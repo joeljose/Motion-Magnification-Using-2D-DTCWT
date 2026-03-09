@@ -81,11 +81,15 @@ def extract_temporal_phases(pyramids, level):
 
     for i in range(1, num_frames):
         curr_phase = normalize_phase(pyramids[i].highpasses[level].flatten())
-        # Complex division gives frame-to-frame phase ratio
-        phases[i, :] = curr_phase / prev_phase
+        # Complex division gives frame-to-frame phase ratio;
+        # suppress warnings from near-zero coefficients (result is harmless)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            phases[i, :] = curr_phase / prev_phase
         prev_phase = curr_phase
 
     # Convert to angles and accumulate to get absolute phase relative to frame 0
+    # np.angle returns 0 for NaN/Inf inputs, so zero-magnitude coefficients
+    # contribute zero phase change as desired
     angles = np.angle(phases)
     angles = np.cumsum(angles, axis=0)
     return angles
@@ -109,7 +113,7 @@ def flattop_filter_1d(data, width, axis=0, mode='reflect'):
         Filtered numpy array with same shape as input.
     """
     window_size = round(width / 0.2327)
-    window = signal.flattop(window_size)
+    window = signal.windows.flattop(window_size)
     window = window / np.sum(window)
     return ndimage.convolve1d(data, window, axis=axis, mode=mode)
 
