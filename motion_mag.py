@@ -23,11 +23,9 @@ import cv2
 import numpy as np
 from scipy import ndimage, signal
 
-# NumPy compatibility: dtcwt uses deprecated aliases removed in NumPy 2.0
+# NumPy compatibility: dtcwt uses np.int which was removed in NumPy 1.24+
 if not hasattr(np, 'int'):
     np.int = np.int64
-if not hasattr(np, 'asfarray'):
-    np.asfarray = lambda a, dtype=np.float64: np.asarray(a, dtype=dtype)
 
 import dtcwt
 
