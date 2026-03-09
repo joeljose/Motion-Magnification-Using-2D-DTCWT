@@ -120,7 +120,7 @@ The `normalize_phase()` function normalizes complex coefficients to unit magnitu
 
 ### Temporal Filtering
 
-`flattop_filter_1d()` applies a flat-top window (from `scipy.signal.flattop`) as a low-pass smoothing kernel along the time axis. The window size is `width / 0.2327`, where 0.2327 is the flat-top window's equivalent noise bandwidth in bins. This filter separates the slow baseline motion from the fast detail motion we want to amplify.
+`flattop_filter_1d()` applies a flat-top window (from `scipy.signal.windows.flattop`) as a low-pass smoothing kernel along the time axis. The window size is `width / 0.2327`, where 0.2327 is the flat-top window's equivalent noise bandwidth in bins. This filter separates the slow baseline motion from the fast detail motion we want to amplify.
 
 ### Phase Modification and Reconstruction
 
