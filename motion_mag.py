@@ -63,6 +63,9 @@ def extract_temporal_phases(pyramids, level):
     numerically stable than phase subtraction), then takes the cumulative
     sum to get absolute phase relative to frame 0.
 
+    Memory-efficient: computes angle() per frame into a pre-allocated float64
+    array, avoiding a full (num_frames, num_coeffs) complex intermediate.
+
     Args:
         pyramids: List of dtcwt Pyramid objects, one per frame.
         level: DTCWT decomposition level index.
@@ -73,25 +76,27 @@ def extract_temporal_phases(pyramids, level):
     """
     num_frames = len(pyramids)
     num_coeffs = pyramids[0].highpasses[level].size
-    dtype = pyramids[0].highpasses[level].dtype
 
-    phases = np.empty((num_frames, num_coeffs), dtype=dtype)
-    phases[0, :] = normalize_phase(pyramids[0].highpasses[level].flatten())
-    prev_phase = phases[0, :]
+    # Allocate float array directly — no full-size complex intermediate
+    angles = np.empty((num_frames, num_coeffs), dtype=np.float64)
+
+    prev_phase = normalize_phase(pyramids[0].highpasses[level].flatten())
+    # Frame 0 stores absolute phase angle (needed for reconstruction)
+    angles[0, :] = np.angle(prev_phase)
 
     for i in range(1, num_frames):
         curr_phase = normalize_phase(pyramids[i].highpasses[level].flatten())
         # Complex division gives frame-to-frame phase ratio;
         # suppress warnings from near-zero coefficients (result is harmless)
         with np.errstate(divide='ignore', invalid='ignore'):
-            phases[i, :] = curr_phase / prev_phase
+            ratio = curr_phase / prev_phase
+        # np.angle returns 0 for NaN/Inf inputs, so zero-magnitude
+        # coefficients contribute zero phase change as desired
+        angles[i, :] = np.angle(ratio)
         prev_phase = curr_phase
 
-    # Convert to angles and accumulate to get absolute phase relative to frame 0
-    # np.angle returns 0 for NaN/Inf inputs, so zero-magnitude coefficients
-    # contribute zero phase change as desired
-    angles = np.angle(phases)
-    angles = np.cumsum(angles, axis=0)
+    # Accumulate to get absolute phase relative to frame 0
+    np.cumsum(angles, axis=0, out=angles)
     return angles
 
 
@@ -193,9 +198,9 @@ def save_video(channels, fps, path, frame_size):
             (frame_count, channels[0].shape[1], channels[0].shape[2], 3),
             dtype=np.uint8
         )
-        result[:, :, :, 2] = np.clip(channels[0], 0, 255).astype(np.uint8)  # R
-        result[:, :, :, 1] = np.clip(channels[1], 0, 255).astype(np.uint8)  # G
-        result[:, :, :, 0] = np.clip(channels[2], 0, 255).astype(np.uint8)  # B
+        result[:, :, :, 2] = np.nan_to_num(np.clip(channels[0], 0, 255)).astype(np.uint8)
+        result[:, :, :, 1] = np.nan_to_num(np.clip(channels[1], 0, 255)).astype(np.uint8)
+        result[:, :, :, 0] = np.nan_to_num(np.clip(channels[2], 0, 255)).astype(np.uint8)
 
         for i in range(frame_count):
             writer.write(result[i])
@@ -262,14 +267,14 @@ def magnify_motions(data, magnification=3.0, width=80, nlevels=8):
         phase = flattop_filter_1d(phase, 2.0, axis=0, mode='reflect')
 
         # Reconstruct coefficients: preserve amplitude, replace phase
+        # Process frame-by-frame to avoid materializing large intermediate arrays
         shape = pyramids[0].highpasses[level].shape
-        all_coeffs = np.array(
-            [pyramids[i].highpasses[level].flatten() for i in range(num_frames)]
-        )
-        amplitudes = np.abs(all_coeffs)
-        modified = amplitudes * np.exp(1j * phase)
         for i in range(num_frames):
-            pyramids[i].highpasses[level][:] = modified[i].reshape(shape)
+            coeffs = pyramids[i].highpasses[level].flatten()
+            amp = np.abs(coeffs)
+            pyramids[i].highpasses[level][:] = (
+                amp * np.exp(1j * phase[i])
+            ).reshape(shape)
 
     # Step 6: Inverse DTCWT
     print("  Inverse DTCWT...")
