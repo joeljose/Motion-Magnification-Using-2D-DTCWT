@@ -360,7 +360,7 @@ def main():
     print(f"  {frame_count} frames, {frame_size[0]}x{frame_size[1]}, {fps} fps")
 
     # --- Parameters ---
-    print(f"\nParameters:")
+    print("\nParameters:")
     print(f"  Magnification:   {args.magnification}x")
     print(f"  Filter width:    {args.width}")
     print(f"  DTCWT levels:    {args.nlevels}\n")
