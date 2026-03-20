@@ -12,7 +12,7 @@ motion magnification (SIGGRAPH 2013) using 2D DTCWT instead of complex
 steerable pyramids.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 import argparse
 import os

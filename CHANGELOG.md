@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-03-20
+
 ### Added
 - Unit tests for core functions (normalize_phase, flattop_filter, extract_temporal_phases, magnify_motions)
 - Input validation tests for all CLI error paths
