@@ -18,6 +18,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY motion_mag.py .
 
+ARG VERSION
+LABEL version=${VERSION}
+
 USER ${UNAME}
 
 ENTRYPOINT ["python", "-u", "motion_mag.py"]
