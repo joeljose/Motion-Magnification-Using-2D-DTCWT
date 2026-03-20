@@ -10,26 +10,34 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+      - name: Build Docker image
+        run: |
+          docker build \
+            --build-arg UID=$(id -u) \
+            --build-arg GID=$(id -g) \
+            --build-arg UNAME=$(whoami) \
+            -t dtcwt-ci .
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Lint
+        run: docker run --rm --entrypoint "" dtcwt-ci ruff check .
 
       - name: Verify import
-        run: python -c "import motion_mag"
+        run: docker run --rm --entrypoint "" dtcwt-ci python -c "import motion_mag"
 
       - name: Verify --help
-        run: python motion_mag.py --help
+        run: docker run --rm --entrypoint "" dtcwt-ci python motion_mag.py --help
 
       - name: Verify --version
-        run: python motion_mag.py --version
+        run: docker run --rm --entrypoint "" dtcwt-ci python motion_mag.py --version
 
       - name: Run full pipeline on face.mp4
-        run: python motion_mag.py -i face.mp4 -o face_magnified.avi -k 3 -w 80 --nlevels 4
+        run: |
+          docker run --rm --entrypoint "" \
+            -v "${{ github.workspace }}:/data" \
+            dtcwt-ci \
+            python -u motion_mag.py -i /data/face.mp4 -o /data/face_magnified.avi -k 3 -w 80 --nlevels 4
 
       - name: Verify output exists
         run: test -f face_magnified.avi

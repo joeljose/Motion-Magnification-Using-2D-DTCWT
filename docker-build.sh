@@ -1,10 +1,14 @@
 #!/bin/bash
 set -e
 
+VERSION=$(cat VERSION)
+
 docker build \
     --build-arg UID="$(id -u)" \
     --build-arg GID="$(id -g)" \
     --build-arg UNAME="$(whoami)" \
-    -t motion-magnification-dtcwt .
+    --build-arg VERSION="${VERSION}" \
+    -t motion-mag-dtcwt:${VERSION} \
+    -t motion-mag-dtcwt:latest .
 
-echo "Built motion-magnification-dtcwt image as user: $(whoami) (uid=$(id -u), gid=$(id -g))"
+echo "Built motion-mag-dtcwt:${VERSION} (also tagged :latest)"

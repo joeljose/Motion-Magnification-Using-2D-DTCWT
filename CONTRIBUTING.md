@@ -7,11 +7,12 @@ Thanks for your interest in contributing!
 1. **Open an issue first** — describe the bug or feature you'd like to work on.
 2. **Fork the repo** and create a branch from `main`.
 3. **Keep PRs small** — one logical change per pull request.
-4. **Follow PEP 8** for Python code style.
-5. **Test your changes** — run the CLI on `face.mp4` to verify nothing is broken:
+4. **Follow PEP 8** for Python code style. We use [ruff](https://docs.astral.sh/ruff/) for linting.
+5. **Test your changes** before opening a PR:
    ```bash
-   python motion_mag.py -i face.mp4 -o test_output.avi -k 3 -w 80
+   ./test.sh
    ```
+   Tests run inside Docker — no local Python dependencies needed. See [Development](README.md#development) in the README for details.
 6. **Open a pull request** against `main` with a clear description of your changes.
 
 ## Reporting bugs
