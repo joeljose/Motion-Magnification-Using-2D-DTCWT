@@ -35,6 +35,10 @@ Phase-based motion magnification amplifies subtle motions invisible to the naked
   - [CLI Tool](#cli-tool)
   - [Notebook](#notebook)
   - [Tips](#tips)
+- [Development](#development)
+  - [Running Tests](#running-tests)
+  - [Versioning](#versioning)
+  - [Project Structure](#project-structure)
 - [References](#references)
 
 ---
@@ -210,6 +214,66 @@ Open the notebook and run all cells. By default, it downloads a sample face vide
 - Larger filter width → smoother temporal filtering, better for slow motions (breathing, pulse).
 - Fewer `nlevels` → faster processing but less spatial detail captured.
 - R, G, B channels are processed independently — color artifacts indicate magnification is too high.
+
+---
+
+## Development
+
+### Running Tests
+
+All tests run inside Docker — no local Python dependencies needed:
+
+```bash
+# Run lint + unit tests (builds image automatically if not found)
+./test.sh
+
+# Force rebuild before testing
+./test.sh --build
+```
+
+**Tests** (`tests/test_motion_mag.py`) cover:
+- Phase normalization (unit magnitude, zero safety)
+- Flat-top temporal filter (DC passthrough, smoothing, edge cases)
+- Temporal phase extraction (constant phase, output shape)
+- `magnify_motions` smoke tests (shape, dtype, finite values)
+- `load_video` buffer safety
+- All CLI input validation error paths
+
+**Dev workflow:**
+1. Make your changes
+2. Run `./test.sh`
+3. If all tests pass, commit and open a PR
+4. CI runs lint + smoke tests automatically
+
+### Versioning
+
+Version is tracked in a `VERSION` file at the project root. `motion_mag.py` has `__version__` baked into the source (updated at release time).
+
+**To cut a release:**
+1. Update `VERSION` with the new version number
+2. Update `__version__` in `motion_mag.py`
+3. Update `CHANGELOG.md` — move items from `[Unreleased]` to `[X.Y.Z] - YYYY-MM-DD`
+4. Commit: `Release vX.Y.Z`
+5. Tag: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`
+6. Push: `git push && git push origin vX.Y.Z`
+7. Rebuild Docker image: `./docker-build.sh`
+
+### Project Structure
+
+```
+motion_mag.py           # CLI tool
+MotionMagDtcwt.ipynb    # Jupyter notebook
+Dockerfile              # Docker image
+docker-build.sh         # Build + tag image
+test.sh                 # Run lint + unit tests (Docker)
+requirements.txt        # Runtime dependencies
+requirements-dev.txt    # Dev dependencies (pytest, ruff)
+tests/
+  test_motion_mag.py    # Unit tests
+docs/design/            # Architecture decision records
+VERSION                 # Single source of truth for version
+CHANGELOG.md            # Release history
+```
 
 ---
 
