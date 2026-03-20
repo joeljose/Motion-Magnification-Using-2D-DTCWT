@@ -23,10 +23,6 @@ import cv2
 import numpy as np
 from scipy import ndimage, signal
 
-# NumPy compatibility: dtcwt uses np.int which was removed in NumPy 1.24+
-if not hasattr(np, 'int'):
-    np.int = np.int64
-
 import dtcwt
 
 
@@ -117,7 +113,7 @@ def flattop_filter_1d(data, width, axis=0, mode='reflect'):
     Returns:
         Filtered numpy array with same shape as input.
     """
-    window_size = round(width / 0.2327)
+    window_size = max(1, round(width / 0.2327))
     window = signal.windows.flattop(window_size)
     window = window / np.sum(window)
     return ndimage.convolve1d(data, window, axis=axis, mode=mode)
@@ -143,13 +139,15 @@ def load_video(path):
         frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = int(cap.get(cv2.CAP_PROP_FPS))
+        fps = cap.get(cv2.CAP_PROP_FPS)
 
         # Read all frames into a single array, then split channels
         frames = np.zeros((frame_count, height, width, 3), dtype=np.uint8)
         i = 0
         t_start = time.time()
         while cap.isOpened():
+            if i >= frame_count:
+                break
             ret, frame = cap.read()
             if not ret:
                 break
