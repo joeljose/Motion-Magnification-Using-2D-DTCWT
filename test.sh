@@ -1,15 +1,34 @@
 #!/bin/bash
 set -e
 
-IMAGE="motion-mag-dtcwt-dev"
+MODE="${1:-cpu}"
+BUILD_FLAG="${2:-}"
+
+if [[ "$MODE" == "gpu" ]]; then
+    IMAGE="motion-mag-dtcwt-gpu-dev"
+    DOCKERFILE="-f Dockerfile.gpu"
+    RUN_FLAGS="--gpus device=0"
+elif [[ "$MODE" == "--build" ]]; then
+    # Handle ./test.sh --build (no mode, just build flag)
+    MODE="cpu"
+    BUILD_FLAG="--build"
+    IMAGE="motion-mag-dtcwt-dev"
+    DOCKERFILE=""
+    RUN_FLAGS=""
+else
+    IMAGE="motion-mag-dtcwt-dev"
+    DOCKERFILE=""
+    RUN_FLAGS=""
+fi
 
 # Build image if it doesn't exist or --build flag passed
-if [[ "$1" == "--build" ]] || ! docker image inspect ${IMAGE} &>/dev/null; then
-    echo "Building test image..."
+if [[ "$BUILD_FLAG" == "--build" ]] || ! docker image inspect ${IMAGE} &>/dev/null; then
+    echo "Building test image (${MODE})..."
     docker build \
         --build-arg UID="$(id -u)" \
         --build-arg GID="$(id -g)" \
         --build-arg UNAME="$(whoami)" \
+        ${DOCKERFILE} \
         -t ${IMAGE} .
     echo ""
 fi
@@ -19,7 +38,7 @@ docker run --rm --entrypoint "" ${IMAGE} ruff check .
 
 echo ""
 echo "=== Tests ==="
-docker run --rm --entrypoint "" ${IMAGE} python -m pytest tests/ -v
+docker run --rm ${RUN_FLAGS} --entrypoint "" ${IMAGE} python -m pytest tests/ -v
 
 echo ""
 echo "All checks passed."

@@ -129,11 +129,69 @@ class TestExtractTemporalPhases:
 
 
 # ---------------------------------------------------------------------------
+# Memory estimation
+# ---------------------------------------------------------------------------
+
+class TestEstimateMemory:
+    """estimate_memory should return CPU RAM and VRAM estimates in bytes."""
+
+    def test_returns_cpu_and_vram(self):
+        cpu_bytes, vram_bytes = motion_mag.estimate_memory(
+            num_frames=100, height=480, width=640, nlevels=4, gpu=True,
+        )
+        assert cpu_bytes > 0
+        assert vram_bytes > 0
+
+    def test_cpu_only_returns_zero_vram(self):
+        cpu_bytes, vram_bytes = motion_mag.estimate_memory(
+            num_frames=100, height=480, width=640, nlevels=4, gpu=False,
+        )
+        assert cpu_bytes > 0
+        assert vram_bytes == 0
+
+    def test_more_frames_uses_more_memory(self):
+        small_cpu, _ = motion_mag.estimate_memory(100, 480, 640, 4, gpu=False)
+        large_cpu, _ = motion_mag.estimate_memory(500, 480, 640, 4, gpu=False)
+        assert large_cpu > small_cpu
+
+    def test_gpu_uses_less_cpu_ram_than_cpu_path(self):
+        """GPU path uses float32 (4 bytes), CPU uses float64 (8 bytes)."""
+        cpu_ram_cpu, _ = motion_mag.estimate_memory(100, 480, 640, 4, gpu=False)
+        cpu_ram_gpu, _ = motion_mag.estimate_memory(100, 480, 640, 4, gpu=True)
+        assert cpu_ram_gpu < cpu_ram_cpu
+
+
+# ---------------------------------------------------------------------------
 # Tier 3: Smoke tests
 # ---------------------------------------------------------------------------
 
 class TestMagnifyMotions:
     """Smoke test magnify_motions on tiny synthetic data."""
+
+    def test_accepts_biort_and_qshift_params(self):
+        """magnify_motions should accept biort and qshift filter parameters."""
+        rng = np.random.RandomState(42)
+        data = rng.rand(5, 16, 16).astype(np.float64)
+        result = motion_mag.magnify_motions(
+            data, magnification=2.0, width=3, nlevels=2,
+            biort='near_sym_a', qshift='qshift_a',
+        )
+        assert result.shape == data.shape
+        assert np.all(np.isfinite(result))
+
+    def test_different_filters_produce_different_output(self):
+        """Changing biort/qshift should change the output."""
+        rng = np.random.RandomState(42)
+        data = rng.rand(5, 16, 16).astype(np.float64)
+        result_a = motion_mag.magnify_motions(
+            data, magnification=2.0, width=3, nlevels=2,
+            biort='near_sym_a', qshift='qshift_a',
+        )
+        result_b = motion_mag.magnify_motions(
+            data, magnification=2.0, width=3, nlevels=2,
+            biort='near_sym_b', qshift='qshift_b',
+        )
+        assert not np.allclose(result_a, result_b, atol=1e-6)
 
     def test_output_shape_and_dtype(self):
         rng = np.random.RandomState(42)
@@ -219,6 +277,35 @@ def dummy_video(tmp_path):
 
 
 class TestInputValidation:
+    def test_gpu_requires_torch(self, dummy_video):
+        """--gpu without torch should exit with clear error."""
+        # Only meaningful on CPU image where torch is not installed
+        try:
+            import torch  # noqa: F401
+            pytest.skip("torch is installed — test only applies to CPU image")
+        except ImportError:
+            pass
+        code, stderr = run_cli("-i", dummy_video, "--gpu")
+        assert code == 1
+        assert "requires PyTorch" in stderr
+
+    def test_gpu_flag_accepted(self, dummy_video):
+        """CLI should accept --gpu without 'unrecognized arguments' error."""
+        code, stderr = run_cli("-i", dummy_video, "--gpu")
+        assert "unrecognized arguments" not in stderr
+
+    def test_device_flag_accepted(self, dummy_video):
+        """CLI should accept --device without 'unrecognized arguments' error."""
+        code, stderr = run_cli("-i", dummy_video, "--device", "0")
+        assert "unrecognized arguments" not in stderr
+
+    def test_biort_flag_accepted(self, dummy_video):
+        """CLI should accept --biort without error (validation only, no processing)."""
+        code, stderr = run_cli("-i", dummy_video, "--biort", "near_sym_a", "--qshift", "qshift_a")
+        # Will fail because dummy_video isn't a real video, but should NOT fail
+        # on argument parsing — no "unrecognized arguments" error
+        assert "unrecognized arguments" not in stderr
+
     def test_nonexistent_input_file(self):
         code, stderr = run_cli("-i", "nonexistent.mp4")
         assert code == 1

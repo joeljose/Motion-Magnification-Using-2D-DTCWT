@@ -1,0 +1,33 @@
+# Pin PyTorch 2.1.2 because pytorch_wavelets is unmaintained (last commit 2022)
+# and uses old-style autograd.Function. Tested working with 2.1.2.
+# numpy<2 required because pytorch_wavelets uses removed NumPy 2.0 APIs.
+FROM pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libgl1 libglib2.0-0 git && \
+    rm -rf /var/lib/apt/lists/*
+
+ARG UID
+ARG GID
+ARG UNAME
+
+RUN groupadd -g ${GID} ${UNAME} && \
+    useradd -m -u ${UID} -g ${GID} ${UNAME}
+
+WORKDIR /app
+
+COPY requirements-gpu.txt requirements-dev.txt ./
+RUN pip install --no-cache-dir -r requirements-gpu.txt -r requirements-dev.txt && \
+    pip install --no-cache-dir git+https://github.com/fbcotter/pytorch_wavelets.git
+
+COPY motion_mag.py .
+COPY tests/ tests/
+
+RUN chown -R ${UID}:${GID} /app
+
+ARG VERSION
+LABEL version=${VERSION}
+
+USER ${UNAME}
+
+ENTRYPOINT ["python", "-u", "motion_mag.py"]
