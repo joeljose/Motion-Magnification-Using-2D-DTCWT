@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-03-21
+
+### Added
+- GPU-accelerated motion magnification via `--gpu` flag (~5x speedup on RTX 4050)
+- `--device` flag for CUDA GPU selection
+- `--biort` and `--qshift` flags for wavelet filter selection
+- `Dockerfile.gpu` based on PyTorch 2.1.2 + CUDA 12.1
+- `docker-build-gpu.sh` build script
+- `requirements-gpu.txt` (scipy, numpy<2, opencv, dtcwt, PyWavelets)
+- GPU test suite (`tests/test_motion_mag_gpu.py`) — 14 tests, skips on CPU-only
+- Pre-flight memory estimation (`estimate_memory()`)
+- GPU design doc (`docs/design/gpu-acceleration.md`)
+
+### Changed
+- **BREAKING**: Default DTCWT filters changed from `near_sym_a`/`qshift_a` to `near_sym_b`/`qshift_b` (fewer block artifacts at higher magnification). Use `--biort near_sym_a --qshift qshift_a` to restore old behavior.
+- CPU temporal filter uses FFT-based convolution for large windows (4x faster, 2x total speedup)
+- `test.sh` supports `gpu` mode (`./test.sh gpu`)
+
 ## [1.1.0] - 2026-03-20
 
 ### Added
