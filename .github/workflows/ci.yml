@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -23,6 +26,9 @@ jobs:
       - name: Lint
         run: docker run --rm --entrypoint "" dtcwt-ci ruff check .
 
+      - name: Unit tests
+        run: docker run --rm --entrypoint "" dtcwt-ci python -m pytest tests -q
+
       - name: Verify import
         run: docker run --rm --entrypoint "" dtcwt-ci python -c "import motion_mag"
 
@@ -39,5 +45,9 @@ jobs:
             dtcwt-ci \
             python -u motion_mag.py -i /data/face.mp4 -o /data/face_magnified.avi -k 3 -w 80 --nlevels 4
 
-      - name: Verify output exists
-        run: test -f face_magnified.avi
+      - name: Verify output
+        run: |
+          docker run --rm --entrypoint "" \
+            -v "${{ github.workspace }}:/data" \
+            dtcwt-ci \
+            python /data/scripts/verify_output.py /data/face.mp4 /data/face_magnified.avi
