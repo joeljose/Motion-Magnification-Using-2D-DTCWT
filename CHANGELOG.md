@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- CI failing on new ruff releases: dev tools pinned, lint rules set in `pyproject.toml` (#24)
+- CI now runs the unit tests and checks the output video (#25)
+- NaN / black regions from exact-zero wavelet coefficients on the CPU path (#22)
+- Output write failures now exit 1 instead of reporting success (#23)
+- CPU peak RAM on face.mp4 cut from 8.3 GiB to 2.9 GiB (float32/complex64, chunked phase filtering, uint8 frames); `estimate_memory()` uses the real coefficient count and is now called from `main()` (#26)
+
 ## [2.0.0] - 2026-03-21
 
 ### Added

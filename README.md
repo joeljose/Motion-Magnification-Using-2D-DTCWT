@@ -225,14 +225,14 @@ See [`docs/design/gpu-acceleration.md`](docs/design/gpu-acceleration.md) for the
 
 ### Performance
 
-Benchmarked on face.mp4 (301 frames, 528x592, k=3) with an RTX 4050 (6 GB VRAM):
+Benchmarked on face.mp4 (301 frames, 528x592, k=3, nlevels 8) with an RTX 4050 Laptop GPU (6 GB VRAM); peak RAM is measured `ru_maxrss` inside Docker:
 
 | Metric | CPU | GPU |
 |---|---|---|
 | Per-channel speedup | — | ~5-17x |
-| End-to-end time | ~2 min | ~24 sec |
-| Precision | float64 | float32 |
-| Peak RAM | ~1.2 GB | ~800 MB |
+| End-to-end time | ~1 min 40 s | ~24 sec |
+| Precision | float32 / complex64 | float32 |
+| Peak RAM | 2.9 GiB | 2.8 GiB |
 | Peak VRAM | — | ~2-3 GB |
 
 **Hardware requirements (GPU path):**
@@ -240,9 +240,9 @@ Benchmarked on face.mp4 (301 frames, 528x592, k=3) with an RTX 4050 (6 GB VRAM):
 - Minimum ~4 GB VRAM recommended (auto-tuning adapts batch/chunk sizes)
 - [`nvidia-container-toolkit`](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) for Docker GPU support
 
-**Pre-flight memory check:** Before processing, the tool estimates peak CPU RAM and VRAM usage and warns if it may exceed available resources, with suggestions to reduce `--nlevels`, resolution, or switch to CPU mode.
+**Memory check:** After loading the video, the tool prints its estimate of peak CPU RAM and warns if it exceeds the available memory (read from `/proc/meminfo` on Linux). CPU peak RAM grows linearly with frame count × resolution: roughly 33 bytes per pixel per frame (about 2.9 GiB for face.mp4).
 
-**Note:** CPU and GPU paths produce different outputs — they use different DTCWT implementations (`dtcwt` vs `pytorch_wavelets`) at different precisions (float64 vs float32). Both produce valid motion magnification results; they are not cross-comparable.
+**Note:** CPU and GPU paths produce different outputs — they use different DTCWT implementations (`dtcwt` vs `pytorch_wavelets`). Both produce valid motion magnification results; they are not cross-comparable.
 
 ---
 
