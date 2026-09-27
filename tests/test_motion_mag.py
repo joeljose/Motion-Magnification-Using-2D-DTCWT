@@ -297,37 +297,75 @@ class TestMagnifyMotionsUint8:
         np.testing.assert_allclose(a, b, atol=1e-3)
 
 
-class TestLoadVideoBufferGuard:
-    def test_frame_count_too_low(self):
-        actual_frames = 10
-        reported_count = 5
-        h, w = 8, 8
-        fake_frames = [np.zeros((h, w, 3), dtype=np.uint8) for _ in range(actual_frames)]
-        call_idx = [0]
+def _mock_capture(actual_frames, reported_count, fps=30.0, h=8, w=8):
+    """A cv2.VideoCapture stand-in yielding `actual_frames` frames."""
+    frames = [np.full((h, w, 3), i, dtype=np.uint8) for i in range(actual_frames)]
+    it = iter(frames)
+    cap = MagicMock()
+    cap.isOpened.return_value = True
+    cap.get.side_effect = lambda prop: {
+        cv2.CAP_PROP_FRAME_COUNT: reported_count,
+        cv2.CAP_PROP_FPS: fps,
+    }[prop]
+    cap.read.side_effect = lambda: next(((True, f) for f in it), (False, None))
+    return cap
 
-        mock_cap = MagicMock()
-        mock_cap.get.side_effect = lambda prop: {
-            cv2.CAP_PROP_FRAME_COUNT: reported_count,
-            cv2.CAP_PROP_FRAME_WIDTH: w,
-            cv2.CAP_PROP_FRAME_HEIGHT: h,
-            cv2.CAP_PROP_FPS: 30.0,
-        }[prop]
-        mock_cap.isOpened.return_value = True
 
-        def mock_read():
-            if call_idx[0] < actual_frames:
-                frame = fake_frames[call_idx[0]]
-                call_idx[0] += 1
-                return True, frame
-            return False, None
-
-        mock_cap.read.side_effect = mock_read
-
-        with patch("cv2.VideoCapture", return_value=mock_cap):
+class TestLoadVideo:
+    @pytest.mark.parametrize("reported", [0, 3, 5, 10, 20])
+    def test_reads_all_frames_whatever_the_reported_count(self, reported):
+        with patch("cv2.VideoCapture", return_value=_mock_capture(10, reported)):
             channels, fps, frame_size = motion_mag.load_video("fake.mp4")
-
-        assert channels[0].shape[0] == reported_count
+        assert channels[0].shape == (10, 8, 8)
+        assert channels[0][:, 0, 0].tolist() == list(range(10))
+        assert frame_size == (8, 8)
         assert fps == 30.0
+
+    def test_unopenable_file_raises(self):
+        cap = MagicMock()
+        cap.isOpened.return_value = False
+        with patch("cv2.VideoCapture", return_value=cap):
+            with pytest.raises(ValueError, match="cannot open video"):
+                motion_mag.load_video("fake.mp4")
+
+    def test_no_frames_raises(self):
+        with patch("cv2.VideoCapture", return_value=_mock_capture(0, 10)):
+            with pytest.raises(ValueError, match="no decodable frames"):
+                motion_mag.load_video("fake.mp4")
+
+
+def _run_main(argv, load_result):
+    """Run main() in-process with load_video patched."""
+    with patch.object(sys, "argv", ["motion_mag.py"] + argv), \
+            patch.object(motion_mag, "load_video", return_value=load_result):
+        motion_mag.main()
+
+
+def _channels(n, size=16):
+    rng = np.random.RandomState(0)
+    return [(rng.rand(n, size, size) * 255).astype(np.uint8) for _ in range(3)]
+
+
+class TestMainLoadChecks:
+    def test_zero_fps_without_override_exits(self, dummy_video, capsys):
+        with pytest.raises(SystemExit) as e:
+            _run_main(["-i", dummy_video], (_channels(6), 0.0, (16, 16)))
+        assert e.value.code == 1
+        assert "pass --fps" in capsys.readouterr().err
+
+    def test_fps_override_is_used(self, dummy_video, tmp_path):
+        out = str(tmp_path / "out.avi")
+        _run_main(["-i", dummy_video, "-o", out, "--fps", "25", "-w", "2", "--nlevels", "1"],
+                  (_channels(6), 0.0, (16, 16)))
+        cap = cv2.VideoCapture(out)
+        assert cap.get(cv2.CAP_PROP_FPS) == 25.0
+        cap.release()
+
+    def test_too_few_frames_exits(self, dummy_video, capsys):
+        with pytest.raises(SystemExit) as e:
+            _run_main(["-i", dummy_video], (_channels(2), 30.0, (16, 16)))
+        assert e.value.code == 1
+        assert "at least 3 frames" in capsys.readouterr().err
 
 
 class TestSaveVideo:
@@ -417,6 +455,12 @@ class TestInputValidation:
         # Will fail because dummy_video isn't a real video, but should NOT fail
         # on argument parsing — no "unrecognized arguments" error
         assert "unrecognized arguments" not in stderr
+
+    def test_corrupt_input_file(self, dummy_video):
+        code, stderr = run_cli("-i", dummy_video)
+        assert code == 1
+        assert "Error:" in stderr
+        assert "Traceback" not in stderr
 
     def test_nonexistent_input_file(self):
         code, stderr = run_cli("-i", "nonexistent.mp4")
