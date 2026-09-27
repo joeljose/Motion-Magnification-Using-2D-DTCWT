@@ -300,7 +300,7 @@ docker run --rm -it --gpus all \
     -i /app/data/input.mp4 -o /app/data/output.avi
 ```
 
-The GPU Docker image is based on `pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime` and includes PyTorch, `pytorch_wavelets`, and all dependencies. The `--gpu` flag is the default entrypoint behavior in the GPU image.
+The GPU Docker image is based on `pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime` and includes PyTorch, `pytorch_wavelets`, and all dependencies. The GPU image's entrypoint passes `--gpu`, so it always uses the GPU path; the CLI prints the active backend under **Parameters**. To run the CPU path, use the CPU image.
 
 ---
 

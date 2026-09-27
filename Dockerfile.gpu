@@ -30,4 +30,4 @@ LABEL version=${VERSION}
 
 USER ${UNAME}
 
-ENTRYPOINT ["python", "-u", "motion_mag.py"]
+ENTRYPOINT ["python", "-u", "motion_mag.py", "--gpu"]

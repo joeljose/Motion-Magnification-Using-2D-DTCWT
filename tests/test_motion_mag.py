@@ -336,6 +336,23 @@ def dummy_video(tmp_path):
     return str(p)
 
 
+def test_cli_reports_backend(tmp_path):
+    """A real (tiny) run prints which backend is active."""
+    src = str(tmp_path / "in.avi")
+    writer = cv2.VideoWriter(src, cv2.VideoWriter_fourcc(*"MJPG"), 30, (16, 16))
+    rng = np.random.RandomState(0)
+    for _ in range(4):
+        writer.write((rng.rand(16, 16, 3) * 255).astype(np.uint8))
+    writer.release()
+    result = subprocess.run(
+        [sys.executable, SCRIPT, "-i", src, "-o", str(tmp_path / "out.avi"),
+         "-w", "2", "--nlevels", "1"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Backend:         CPU (dtcwt)" in result.stdout
+
+
 class TestInputValidation:
     def test_gpu_requires_torch(self, dummy_video):
         """--gpu without torch should exit with clear error."""
