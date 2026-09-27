@@ -279,7 +279,7 @@ jupyter notebook MotionMagDtcwt.ipynb
 ./docker-build.sh
 
 # Run
-docker run --rm -it \
+docker run --rm -it --user "$(id -u):$(id -g)" \
     -v "$(pwd)":/app/data \
     motion-mag-dtcwt:latest \
     -i /app/data/input.mp4 -o /app/data/output.avi
@@ -294,11 +294,13 @@ Requires [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-nat
 ./docker-build-gpu.sh
 
 # Run
-docker run --rm -it --gpus all \
+docker run --rm -it --gpus all --user "$(id -u):$(id -g)" \
     -v "$(pwd)":/app/data \
     motion-mag-dtcwt-gpu:latest \
     -i /app/data/input.mp4 -o /app/data/output.avi
 ```
+
+Both images run as a fixed non-root user (`app`, UID 1000). `--user "$(id -u):$(id -g)"` makes the output files in the mounted folder belong to you; without it, the folder must be writable by UID 1000.
 
 The GPU Docker image is based on `pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime` and includes PyTorch, `pytorch_wavelets`, and all dependencies. The GPU image's entrypoint passes `--gpu`, so it always uses the GPU path; the CLI prints the active backend under **Parameters**. To run the CPU path, use the CPU image.
 
@@ -428,12 +430,19 @@ Dockerfile.gpu             # GPU Docker image (pytorch:2.1.2-cuda12.1)
 docker-build.sh            # Build + tag CPU image
 docker-build-gpu.sh        # Build + tag GPU image
 test.sh                    # Run lint + tests (Docker, supports cpu/gpu mode)
-requirements.txt           # CPU runtime dependencies
-requirements-gpu.txt       # GPU runtime dependencies
+requirements.txt           # CPU runtime dependencies (version ranges)
+requirements-gpu.txt       # GPU runtime dependencies (version ranges)
 requirements-dev.txt       # Dev dependencies (pytest, ruff)
+requirements.lock          # Hash-locked CPU image dependencies
+requirements-gpu.lock      # Hash-locked GPU image dependencies
+pyproject.toml             # ruff configuration
+scripts/
+  verify_output.py         # CI check of the pipeline output
+  make_golden.py           # Regenerates tests/data/golden_face.npz
 tests/
   test_motion_mag.py       # CPU unit tests
   test_motion_mag_gpu.py   # GPU unit tests (CUDA-only, skip on CPU)
+  data/golden_face.npz     # Golden regression data
 docs/design/               # Architecture decision records
   gpu-acceleration.md      # GPU design doc
   dtcwt-hardening.md       # Hardening design doc

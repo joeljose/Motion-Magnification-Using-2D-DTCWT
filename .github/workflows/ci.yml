@@ -13,15 +13,11 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Build Docker image
         run: |
-          docker build \
-            --build-arg UID=$(id -u) \
-            --build-arg GID=$(id -g) \
-            --build-arg UNAME=$(whoami) \
-            -t dtcwt-ci .
+          docker build -t dtcwt-ci .
 
       - name: Lint
         run: docker run --rm --entrypoint "" dtcwt-ci ruff check .
@@ -40,7 +36,7 @@ jobs:
 
       - name: Run full pipeline on face.mp4
         run: |
-          docker run --rm --entrypoint "" \
+          docker run --rm --entrypoint "" --user "$(id -u):$(id -g)" \
             -v "${{ github.workspace }}:/data" \
             dtcwt-ci \
             python -u motion_mag.py -i /data/face.mp4 -o /data/face_magnified.avi -k 3 -w 80 --nlevels 4
