@@ -211,6 +211,11 @@ class TestEstimateMemory:
         assert per_frame(gpu=True) < per_frame(gpu=False)
 
 
+def _psnr(a, b):
+    mse = np.mean((np.asarray(a, np.float64) - np.asarray(b, np.float64)) ** 2)
+    return np.inf if mse == 0 else 10 * np.log10(255 ** 2 / mse)
+
+
 # ---------------------------------------------------------------------------
 # Tier 3: Smoke tests
 # ---------------------------------------------------------------------------
@@ -272,14 +277,47 @@ class TestMagnifyMotions:
         assert np.all(np.isfinite(result))
 
     def test_magnification_one_near_identity(self):
-        """With magnification=1.0, output should be close to input
-        (no amplification of phase deviations)."""
-        rng = np.random.RandomState(42)
-        data = rng.rand(10, 32, 32).astype(np.float64)
-        result = motion_mag.magnify_motions(data, magnification=1.0, width=5, nlevels=2)
-        # Not exact due to DTCWT roundtrip + filtering, but should be close
-        error = np.mean(np.abs(result - data))
-        assert error < 10.0  # generous bound — just checking it's not garbage
+        """With k=1 a static textured clip must come back unchanged."""
+        texture = ndimage.gaussian_filter(np.random.RandomState(0).rand(64, 64), 1.5) * 255
+        data = np.repeat(texture[None], 8, axis=0)
+        result = motion_mag.magnify_motions(data, magnification=1.0, width=5, nlevels=3)
+        assert _psnr(result, data) >= 60  # measured ~138 dB
+
+    @pytest.mark.parametrize("k", [2, 4])
+    def test_motion_is_magnified_k_times(self, k):
+        """A texture moving by 0.1 px * sin(2 pi t / 16) must move about k times
+        as far in the output. Shift is estimated per frame from the image
+        gradient (linear for sub-pixel motion)."""
+        n, amp, period = 96, 0.1, 16
+        base = ndimage.gaussian_filter(np.random.RandomState(0).rand(64, 64), 2) * 255
+        spectrum = np.fft.fft2(base)
+        shifts = amp * np.sin(2 * np.pi * np.arange(n) / period)
+        frames = np.stack([np.real(np.fft.ifft2(ndimage.fourier_shift(spectrum, (0, s))))
+                           for s in shifts])
+
+        def gain(clip):
+            mid = slice(24, 72)  # away from the temporal filter's edges
+            ref = clip[mid].mean(axis=0)
+            gx = np.gradient(ref, axis=1)[8:-8, 8:-8]
+            est = np.array([-(gx * (f - ref)[8:-8, 8:-8]).sum() / (gx * gx).sum()
+                            for f in clip[mid]])
+            s = shifts[mid] - shifts[mid].mean()
+            return (est - est.mean()) @ s / (s @ s)
+
+        out = motion_mag.magnify_motions(frames, magnification=k, width=20, nlevels=4)
+        ratio = gain(out) / gain(frames) / k
+        assert 0.8 <= ratio <= 1.2, ratio  # measured 0.95 (k=2), 0.93 (k=4)
+
+    def test_golden_output(self):
+        """Regression against a stored crop of face.mp4 and its output.
+        Regenerate with scripts/make_golden.py only for intended changes."""
+        golden = np.load(os.path.join(os.path.dirname(__file__), "data", "golden_face.npz"))
+        sys.path.insert(0, os.path.join(os.path.dirname(SCRIPT), "scripts"))
+        import make_golden
+        output = make_golden.magnify(golden["input"])
+        assert _psnr(output, golden["output"]) >= 60
+        # the golden output itself must differ from the input (motion was magnified)
+        assert _psnr(golden["output"], golden["input"]) < 55
 
 
 # ---------------------------------------------------------------------------
@@ -409,21 +447,59 @@ def dummy_video(tmp_path):
     return str(p)
 
 
-def test_cli_reports_backend(tmp_path):
-    """A real (tiny) run prints which backend is active."""
-    src = str(tmp_path / "in.avi")
-    writer = cv2.VideoWriter(src, cv2.VideoWriter_fourcc(*"MJPG"), 30, (16, 16))
+@pytest.fixture
+def tiny_video(tmp_path):
+    """A real 12-frame 64x48 MJPG clip."""
+    path = str(tmp_path / "in.avi")
+    writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"MJPG"), 30, (64, 48))
     rng = np.random.RandomState(0)
-    for _ in range(4):
-        writer.write((rng.rand(16, 16, 3) * 255).astype(np.uint8))
+    for _ in range(12):
+        writer.write((rng.rand(48, 64, 3) * 255).astype(np.uint8))
     writer.release()
-    result = subprocess.run(
-        [sys.executable, SCRIPT, "-i", src, "-o", str(tmp_path / "out.avi"),
-         "-w", "2", "--nlevels", "1"],
-        capture_output=True, text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    assert "Backend:         CPU (dtcwt)" in result.stdout
+    return path
+
+
+def run_cli_full(*args):
+    return subprocess.run([sys.executable, SCRIPT] + list(args), capture_output=True, text=True)
+
+
+class TestCliEndToEnd:
+    def _check_output(self, path):
+        cap = cv2.VideoCapture(path)
+        count = 0
+        while cap.read()[0]:
+            count += 1
+        size = (cap.get(cv2.CAP_PROP_FRAME_WIDTH), cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
+        assert count == 12
+        assert size == (64, 48)
+
+    def test_cpu_run_reports_backend_and_writes_output(self, tiny_video, tmp_path):
+        out = str(tmp_path / "out.avi")
+        result = run_cli_full("-i", tiny_video, "-o", out, "-w", "2", "--nlevels", "2")
+        assert result.returncode == 0, result.stderr
+        assert "Backend:         CPU (dtcwt)" in result.stdout
+        self._check_output(out)
+
+    def test_filter_flags_are_used(self, tiny_video, tmp_path):
+        out = str(tmp_path / "out.avi")
+        result = run_cli_full("-i", tiny_video, "-o", out, "-w", "2", "--nlevels", "2",
+                              "--biort", "near_sym_a", "--qshift", "qshift_a", "--device", "0")
+        assert result.returncode == 0, result.stderr
+        assert "Biort filter:    near_sym_a" in result.stdout
+        assert "Qshift filter:   qshift_a" in result.stdout
+        self._check_output(out)
+
+    def test_gpu_run(self, tiny_video, tmp_path):
+        torch = pytest.importorskip("torch")
+        pytest.importorskip("pytorch_wavelets")
+        if not torch.cuda.is_available():
+            pytest.skip("no CUDA GPU")
+        out = str(tmp_path / "out.avi")
+        result = run_cli_full("-i", tiny_video, "-o", out, "-w", "2", "--nlevels", "2", "--gpu")
+        assert result.returncode == 0, result.stderr
+        assert "Backend:         GPU" in result.stdout
+        self._check_output(out)
 
 
 class TestInputValidation:
@@ -438,23 +514,6 @@ class TestInputValidation:
         code, stderr = run_cli("-i", dummy_video, "--gpu")
         assert code == 1
         assert "requires PyTorch" in stderr
-
-    def test_gpu_flag_accepted(self, dummy_video):
-        """CLI should accept --gpu without 'unrecognized arguments' error."""
-        code, stderr = run_cli("-i", dummy_video, "--gpu")
-        assert "unrecognized arguments" not in stderr
-
-    def test_device_flag_accepted(self, dummy_video):
-        """CLI should accept --device without 'unrecognized arguments' error."""
-        code, stderr = run_cli("-i", dummy_video, "--device", "0")
-        assert "unrecognized arguments" not in stderr
-
-    def test_biort_flag_accepted(self, dummy_video):
-        """CLI should accept --biort without error (validation only, no processing)."""
-        code, stderr = run_cli("-i", dummy_video, "--biort", "near_sym_a", "--qshift", "qshift_a")
-        # Will fail because dummy_video isn't a real video, but should NOT fail
-        # on argument parsing — no "unrecognized arguments" error
-        assert "unrecognized arguments" not in stderr
 
     def test_corrupt_input_file(self, dummy_video):
         code, stderr = run_cli("-i", dummy_video)

@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Temporal filter was half a frame off centre (even window lengths) and the FFT and direct paths handled clip edges differently; windows are now always odd and all paths use the same boundary rule. Output changes slightly, mostly near the first and last frames (#29)
 - Odd frame sizes crashed the CPU path at the inverse DTCWT (#30)
 - Unreadable input now exits 1 with a clear error; frames beyond an under-reported frame count are no longer dropped; a missing frame rate is an error unless the new `--fps` is given; clips shorter than 3 frames are rejected (#31)
+- Tests: weak assertions tightened; added a golden regression test (`tests/data/golden_face.npz`, regenerated with `scripts/make_golden.py`), a test that motion is magnified about k times, and CLI runs on a real clip (#32)
 
 ## [2.0.0] - 2026-03-21
 
