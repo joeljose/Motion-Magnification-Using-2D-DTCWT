@@ -20,10 +20,9 @@ import sys
 import time
 
 import cv2
+import dtcwt
 import numpy as np
 from scipy import ndimage, signal
-
-import dtcwt
 
 
 def format_duration(seconds):
