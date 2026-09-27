@@ -278,9 +278,16 @@ def save_video(channels, fps, path, frame_size):
         fps: Frame rate for the output video.
         path: Output file path.
         frame_size: (width, height) tuple.
+
+    Raises:
+        RuntimeError: If the writer cannot be opened or writes no data.
     """
     fourcc = cv2.VideoWriter_fourcc(*'MJPG')
     writer = cv2.VideoWriter(path, fourcc, fps, frame_size, True)
+    if not writer.isOpened():
+        writer.release()
+        raise RuntimeError(f"could not open video writer for {path} "
+                           f"(codec MJPG, fps {fps})")
     try:
         frame_count = channels[0].shape[0]
         result = np.empty(
@@ -295,6 +302,8 @@ def save_video(channels, fps, path, frame_size):
             writer.write(result[i])
     finally:
         writer.release()
+    if not os.path.isfile(path) or os.path.getsize(path) == 0:
+        raise RuntimeError(f"video writer produced no data in {path}")
     print(f"Output saved to {path}")
 
 
@@ -809,6 +818,11 @@ def main():
         base = os.path.splitext(args.input)[0]
         args.output = f"{base}_magnified.avi"
 
+    out_dir = os.path.dirname(os.path.abspath(args.output))
+    if not os.path.isdir(out_dir):
+        print(f"Error: output directory does not exist: {out_dir}", file=sys.stderr)
+        sys.exit(1)
+
     # --- Load video ---
     total_start = time.time()
     print(f"Loading {args.input}...")
@@ -862,7 +876,11 @@ def main():
 
     # --- Save ---
     print("Saving output...")
-    save_video(channels, fps, args.output, frame_size)
+    try:
+        save_video(channels, fps, args.output, frame_size)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
     print(f"Total processing time: "
           f"{format_duration(time.time() - total_start)}")
