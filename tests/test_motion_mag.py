@@ -124,7 +124,7 @@ class TestExtractTemporalPhases:
 
         phases = motion_mag.extract_temporal_phases(pyramids, level=0)
         assert phases.shape == (5, num_coeffs)
-        assert phases.dtype == np.float64
+        assert phases.dtype == np.float32
 
     def test_zero_coefficients_give_finite_phase(self):
         """Exact-zero coefficients (e.g. a black border) must not give NaN."""
@@ -174,11 +174,21 @@ class TestEstimateMemory:
         large_cpu, _ = motion_mag.estimate_memory(500, 480, 640, 4, gpu=False)
         assert large_cpu > small_cpu
 
-    def test_gpu_uses_less_cpu_ram_than_cpu_path(self):
-        """GPU path uses float32 (4 bytes), CPU uses float64 (8 bytes)."""
-        cpu_ram_cpu, _ = motion_mag.estimate_memory(100, 480, 640, 4, gpu=False)
-        cpu_ram_gpu, _ = motion_mag.estimate_memory(100, 480, 640, 4, gpu=True)
-        assert cpu_ram_gpu < cpu_ram_cpu
+    def test_uses_real_coefficient_count(self):
+        """The estimate must cover the complex64 pyramids: 8 bytes per
+        coefficient, and DTCWT has about 2 coefficients per pixel."""
+        n, h, w = 100, 480, 640
+        cpu_bytes, _ = motion_mag.estimate_memory(n, h, w, 4, gpu=False)
+        assert cpu_bytes > n * h * w * 2 * 8
+
+    def test_gpu_ram_grows_slower_than_cpu_path(self):
+        """GPU path keeps float32 phases, CPU keeps complex64 pyramids, so the
+        per-frame cost is lower on GPU (its fixed torch overhead is higher)."""
+        def per_frame(gpu):
+            small, _ = motion_mag.estimate_memory(100, 480, 640, 4, gpu=gpu)
+            large, _ = motion_mag.estimate_memory(500, 480, 640, 4, gpu=gpu)
+            return (large - small) / 400
+        assert per_frame(gpu=True) < per_frame(gpu=False)
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +228,7 @@ class TestMagnifyMotions:
         data = rng.rand(10, 32, 32).astype(np.float64)
         result = motion_mag.magnify_motions(data, magnification=2.0, width=5, nlevels=2)
         assert result.shape == data.shape
-        assert result.dtype == np.float64
+        assert result.dtype == np.float32
 
     def test_values_finite(self):
         rng = np.random.RandomState(42)
@@ -240,6 +250,17 @@ class TestMagnifyMotions:
 # ---------------------------------------------------------------------------
 # Bug fix: load_video buffer guard
 # ---------------------------------------------------------------------------
+
+class TestMagnifyMotionsUint8:
+    def test_uint8_input_matches_float_input(self):
+        """load_video returns uint8 channels; results must match float input."""
+        rng = np.random.RandomState(0)
+        data = (rng.rand(6, 16, 16) * 255).astype(np.uint8)
+        a = motion_mag.magnify_motions(data, magnification=2.0, width=3, nlevels=2)
+        b = motion_mag.magnify_motions(data.astype(np.float64), magnification=2.0,
+                                       width=3, nlevels=2)
+        np.testing.assert_allclose(a, b, atol=1e-3)
+
 
 class TestLoadVideoBufferGuard:
     def test_frame_count_too_low(self):

@@ -58,7 +58,7 @@ def extract_temporal_phases(pyramids, level):
     phase wrapping, unlike subtracting angles), then takes the cumulative
     sum to get absolute phase relative to frame 0.
 
-    Memory-efficient: computes angle() per frame into a pre-allocated float64
+    Memory-efficient: computes angle() per frame into a pre-allocated float32
     array, avoiding a full (num_frames, num_coeffs) complex intermediate.
 
     Args:
@@ -73,7 +73,7 @@ def extract_temporal_phases(pyramids, level):
     num_coeffs = pyramids[0].highpasses[level].size
 
     # Allocate float array directly — no full-size complex intermediate
-    angles = np.empty((num_frames, num_coeffs), dtype=np.float64)
+    angles = np.empty((num_frames, num_coeffs), dtype=np.float32)
 
     prev_phase = normalize_phase(pyramids[0].highpasses[level].flatten())
     # Frame 0 stores absolute phase angle (needed for reconstruction)
@@ -167,42 +167,44 @@ def flattop_filter_1d(data, width, axis=0, mode='reflect'):
 def estimate_memory(num_frames, height, width, nlevels, gpu=False):
     """Estimate peak CPU RAM and VRAM usage in bytes.
 
+    Uses the real DTCWT coefficient count (about 2x the pixel count), from a
+    forward transform of one blank frame.
+
     Args:
         num_frames: Number of video frames.
         height: Frame height in pixels.
         width: Frame width in pixels.
         nlevels: Number of DTCWT decomposition levels.
-        gpu: If True, estimate for GPU path (float32); otherwise CPU (float64).
+        gpu: If True, estimate for the GPU path; otherwise the CPU path.
 
     Returns:
         Tuple of (cpu_ram_bytes, vram_bytes).
     """
-    bytes_per_pixel = 4 if gpu else 8  # float32 vs float64
+    highpasses = dtcwt.Transform2d().forward(
+        np.zeros((height, width)), nlevels=nlevels).highpasses
+    coeffs = sum(h.size for h in highpasses)
+    largest_level = max(h.size for h in highpasses)
+    pixels = num_frames * height * width
 
-    # Frames: num_frames × H × W × 3 channels
-    frames_bytes = num_frames * height * width * 3 * bytes_per_pixel
-
-    # Phase arrays (GPU path) or pyramid storage (CPU path)
-    # DTCWT coefficients per level: (H/2^l, W/2^l, 6) — geometric series
-    # sums to roughly 1.33× input size per channel
-    coeff_factor = 1.33
-    phase_bytes = int(num_frames * height * width * coeff_factor * bytes_per_pixel)
-    # CPU path stores complex pyramids (2× for real+imag) per channel
-    # GPU path stores float32 phase arrays per channel
+    frames_bytes = pixels * 3  # uint8 R, G, B
     if gpu:
-        # Phase arrays for all 3 channels (stored on CPU between passes)
-        cpu_ram = frames_bytes + phase_bytes * 3
+        # float32 input channel + float32 result + float32 phases, all levels
+        working = pixels * 4 * 2 + num_frames * coeffs * 4
     else:
-        # Pyramids stored as complex (2× the coefficient size) per channel,
-        # but processed one channel at a time
-        cpu_ram = frames_bytes + phase_bytes * 2  # complex = 2× float
+        # complex64 pyramids for one channel + float32 phases for one level
+        working = num_frames * coeffs * 8 + num_frames * largest_level * 4
+    # ponytail: 1.2x allocator/temporary factor plus import overhead (128 MiB,
+    # +512 MiB for torch/CUDA), fitted to face.mp4 (301x592x528, nlevels 8);
+    # re-fit if the memory layout changes
+    imports = (128 + (512 if gpu else 0)) * 1024**2
+    cpu_ram = int((frames_bytes + working) * 1.2) + imports
 
     # VRAM estimate (GPU only)
     if gpu:
         # DTCWT batch: ~13 MB per frame at 528×592
         batch_vram = 10 * height * width * 13 * 4  # 10 frames × overhead
         # cuFFT chunk: largest level phase chunk + FFT buffers
-        fft_vram = min(phase_bytes, 500 * 1024 * 1024)  # cap at 500 MB
+        fft_vram = min(num_frames * coeffs * 4, 500 * 1024 * 1024)  # cap at 500 MB
         vram = batch_vram + fft_vram + 300 * 1024 * 1024  # 300 MB overhead
     else:
         vram = 0
@@ -210,18 +212,31 @@ def estimate_memory(num_frames, height, width, nlevels, gpu=False):
     return cpu_ram, vram
 
 
+def _available_memory():
+    """Available RAM in bytes from /proc/meminfo, or None if unknown."""
+    try:
+        with open('/proc/meminfo') as f:
+            for line in f:
+                if line.startswith('MemAvailable:'):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return None
+
+
 def load_video(path):
     """Load a video file into separate R, G, B channel arrays.
 
-    Each channel is stored as a float64 array of shape (num_frames, height,
-    width). OpenCV reads in BGR order; channels are split accordingly.
+    Each channel is a uint8 array of shape (num_frames, height, width);
+    processing converts one channel at a time, which keeps memory low.
+    OpenCV reads in BGR order; channels are split accordingly.
 
     Args:
         path: Path to the video file.
 
     Returns:
         Tuple of (channels, fps, frame_size) where:
-        - channels: list of 3 numpy arrays [R, G, B], each (N, H, W) float64
+        - channels: list of 3 numpy arrays [R, G, B], each (N, H, W) uint8
         - fps: frame rate as integer
         - frame_size: (width, height) tuple
     """
@@ -256,11 +271,11 @@ def load_video(path):
 
     frames = frames[:i]
 
-    # Split BGR channels to separate float64 arrays
+    # Split BGR channels into separate contiguous uint8 arrays
     channels = [
-        frames[:, :, :, 2].astype(np.float64),  # R
-        frames[:, :, :, 1].astype(np.float64),  # G
-        frames[:, :, :, 0].astype(np.float64),  # B
+        np.ascontiguousarray(frames[:, :, :, 2]),  # R
+        np.ascontiguousarray(frames[:, :, :, 1]),  # G
+        np.ascontiguousarray(frames[:, :, :, 0]),  # B
     ]
     del frames
 
@@ -634,6 +649,10 @@ def _gpu_temporal_filter(phase_arrays, magnification, width, device):
             torch.cuda.empty_cache()
 
 
+# Coefficient columns filtered at a time in magnify_motions
+_PHASE_CHUNK = 10000
+
+
 def magnify_motions(data, magnification=3.0, width=80, nlevels=8,
                     biort='near_sym_b', qshift='qshift_b'):
     """Run the phase-based motion magnification pipeline on a single channel.
@@ -647,10 +666,12 @@ def magnify_motions(data, magnification=3.0, width=80, nlevels=8,
     6. Inverse DTCWT — reconstruct with modified phase, preserved amplitude
 
     Note: All frame pyramids must remain in memory for temporal filtering.
-    This is memory-intensive for long videos.
+    They are stored as complex64 and the phase maths runs in float32, which
+    roughly halves memory against float64 with no visible difference.
 
     Args:
-        data: 3D numpy array of shape (num_frames, height, width), single channel.
+        data: 3D numpy array of shape (num_frames, height, width), single
+            channel, any real dtype (uint8 frames are converted per frame).
         magnification: Amplification factor for phase deviations (default: 3.0).
         width: Temporal filter width in frames (default: 80).
         nlevels: Number of DTCWT decomposition levels (default: 8).
@@ -658,7 +679,7 @@ def magnify_motions(data, magnification=3.0, width=80, nlevels=8,
         qshift: Quarter-shift filter for DTCWT levels 2+ (default: 'qshift_b').
 
     Returns:
-        3D numpy array of same shape as input with magnified motions.
+        float32 array of the same shape as the input, with magnified motions.
     """
     transform = dtcwt.Transform2d(biort=biort, qshift=qshift)
     num_frames = data.shape[0]
@@ -668,7 +689,9 @@ def magnify_motions(data, magnification=3.0, width=80, nlevels=8,
     print("  Forward DTCWT...")
     t_start = time.time()
     for i in range(num_frames):
-        pyramids.append(transform.forward(data[i, :, :], nlevels=nlevels))
+        pyramid = transform.forward(data[i, :, :], nlevels=nlevels)
+        pyramid.highpasses = tuple(h.astype(np.complex64) for h in pyramid.highpasses)
+        pyramids.append(pyramid)
 
         if (i + 1) % max(1, num_frames // 10) == 0:
             elapsed = time.time() - t_start
@@ -685,14 +708,21 @@ def magnify_motions(data, magnification=3.0, width=80, nlevels=8,
         # Step 2: Extract cumulative temporal phase
         phase = extract_temporal_phases(pyramids, level)
 
-        # Step 3: Temporal filtering — separate base motion from detail
-        phase0 = flattop_filter_1d(phase, width, axis=0, mode='reflect')
+        # Steps 3-5 run on column chunks (filtering is per coefficient), so
+        # no full-size phase0 or filtered copy is ever held in memory
+        for start in range(0, phase.shape[1], _PHASE_CHUNK):
+            chunk = phase[:, start:start + _PHASE_CHUNK]
 
-        # Step 4: Amplify detail phase deviations by magnification factor
-        phase = phase0 + (phase - phase0) * magnification
+            # Step 3: Temporal filtering — separate base motion from detail
+            phase0 = flattop_filter_1d(chunk, width, axis=0, mode='reflect')
 
-        # Step 5: Additional smoothing to remove high-frequency phase noise
-        phase = flattop_filter_1d(phase, 2.0, axis=0, mode='reflect')
+            # Step 4: Amplify detail phase deviations by magnification factor
+            chunk -= phase0
+            chunk *= magnification
+            chunk += phase0
+
+            # Step 5: Additional smoothing to remove high-frequency phase noise
+            chunk[:] = flattop_filter_1d(chunk, 2.0, axis=0, mode='reflect')
 
         # Reconstruct coefficients: preserve amplitude, replace phase
         # Process frame-by-frame to avoid materializing large intermediate arrays
@@ -706,10 +736,11 @@ def magnify_motions(data, magnification=3.0, width=80, nlevels=8,
 
     # Step 6: Inverse DTCWT
     print("  Inverse DTCWT...")
-    result = np.empty_like(data)
+    result = np.empty(data.shape, dtype=np.float32)
     t_start = time.time()
     for i in range(num_frames):
         result[i, :, :] = transform.inverse(pyramids[i])
+        pyramids[i] = None  # free each pyramid once reconstructed
 
         if (i + 1) % max(1, num_frames // 10) == 0:
             elapsed = time.time() - t_start
@@ -830,6 +861,15 @@ def main():
     frame_count = channels[0].shape[0]
     print(f"  {frame_count} frames, {frame_size[0]}x{frame_size[1]}, {fps} fps")
 
+    need, _ = estimate_memory(frame_count, frame_size[1], frame_size[0],
+                              args.nlevels, gpu=args.gpu)
+    available = _available_memory()
+    print(f"  Estimated peak RAM: {need / 1024**3:.1f} GiB")
+    if available is not None and need > available:
+        print(f"Warning: estimated peak RAM ({need / 1024**3:.1f} GiB) exceeds "
+              f"available memory ({available / 1024**3:.1f} GiB). Consider a "
+              f"shorter or smaller clip, or fewer --nlevels.", file=sys.stderr)
+
     # --- Parameters ---
     print("\nParameters:")
     print(f"  Magnification:   {args.magnification}x")
@@ -847,15 +887,13 @@ def main():
         gpu_name = torch.cuda.get_device_name(args.device)
         gpu_vram = torch.cuda.get_device_properties(args.device).total_memory
         print(f"GPU: {gpu_name} ({gpu_vram / 1024**3:.1f} GB VRAM)")
-        # Convert to float32 for GPU path
-        channels = [ch.astype(np.float32) for ch in channels]
 
     for idx, name in enumerate(channel_names):
         print(f"Processing {name} channel...")
         t0 = time.time()
         if args.gpu:
-            channels[idx] = magnify_motions_gpu(
-                channels[idx],
+            result = magnify_motions_gpu(
+                channels[idx].astype(np.float32),
                 magnification=args.magnification,
                 width=args.width,
                 nlevels=args.nlevels,
@@ -864,7 +902,7 @@ def main():
                 device=device,
             )
         else:
-            channels[idx] = magnify_motions(
+            result = magnify_motions(
                 channels[idx],
                 magnification=args.magnification,
                 width=args.width,
@@ -872,6 +910,9 @@ def main():
                 biort=args.biort,
                 qshift=args.qshift,
             )
+        # Keep only the uint8 result so finished channels cost 1 byte/pixel
+        channels[idx] = np.clip(np.rint(result), 0, 255).astype(np.uint8)
+        del result
         print(f"  Done in {format_duration(time.time() - t0)}")
 
     # --- Save ---
