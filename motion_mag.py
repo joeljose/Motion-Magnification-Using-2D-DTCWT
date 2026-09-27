@@ -872,6 +872,8 @@ def main():
 
     # --- Parameters ---
     print("\nParameters:")
+    backend = "GPU (pytorch_wavelets, float32)" if args.gpu else "CPU (dtcwt)"
+    print(f"  Backend:         {backend}")
     print(f"  Magnification:   {args.magnification}x")
     print(f"  Filter width:    {args.width}")
     print(f"  DTCWT levels:    {args.nlevels}")
