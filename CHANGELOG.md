@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - GPU Docker image ran the CPU path by default; its entrypoint now passes `--gpu`, and the CLI prints the active backend (#27)
 - Notebook failed on SciPy >= 1.13 and wrapped pixel values; it now calls `motion_mag` instead of keeping its own copy of the algorithm (#28)
 - Temporal filter was half a frame off centre (even window lengths) and the FFT and direct paths handled clip edges differently; windows are now always odd and all paths use the same boundary rule. Output changes slightly, mostly near the first and last frames (#29)
+- Odd frame sizes crashed the CPU path at the inverse DTCWT (#30)
 
 ## [2.0.0] - 2026-03-21
 

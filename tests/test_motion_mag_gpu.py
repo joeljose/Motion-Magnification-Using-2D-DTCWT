@@ -228,6 +228,15 @@ class TestMagnifyMotionsGpu:
         assert result.mean() > 10
         assert result.mean() < 500
 
+    @pytest.mark.parametrize("shape", [(6, 31, 33), (6, 32, 33)])
+    def test_odd_frame_size(self, shape):
+        data = (np.random.RandomState(0).rand(*shape) * 255).astype(np.float32)
+        result = motion_mag.magnify_motions_gpu(
+            data, magnification=3.0, width=3, nlevels=2, device=torch.device('cuda'),
+        )
+        assert result.shape == data.shape
+        assert np.isfinite(result).all()
+
 
 class TestGpuForwardPassDtype:
     """Separate class for dtype test to keep TestGpuForwardPass clean."""

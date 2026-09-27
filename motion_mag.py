@@ -751,7 +751,8 @@ def magnify_motions(data, magnification=3.0, width=80, nlevels=8,
     result = np.empty(data.shape, dtype=np.float32)
     t_start = time.time()
     for i in range(num_frames):
-        result[i, :, :] = transform.inverse(pyramids[i])
+        # dtcwt pads odd sizes by one row/column; crop back to the input size
+        result[i, :, :] = transform.inverse(pyramids[i])[:data.shape[1], :data.shape[2]]
         pyramids[i] = None  # free each pyramid once reconstructed
 
         if (i + 1) % max(1, num_frames // 10) == 0:
