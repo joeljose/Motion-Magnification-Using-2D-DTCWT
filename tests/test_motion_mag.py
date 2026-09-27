@@ -9,6 +9,7 @@ import cv2
 import dtcwt
 import numpy as np
 import pytest
+from scipy import ndimage
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import motion_mag
@@ -88,6 +89,25 @@ class TestFlattopFilter:
         data = np.random.rand(50, 8).astype(np.float64)
         filtered = motion_mag.flattop_filter_1d(data, width=10, axis=0)
         assert filtered.shape == data.shape
+
+    @pytest.mark.parametrize("width", [2, 7, 8, 20, 80, 81])
+    def test_fft_path_matches_direct_convolution(self, width):
+        """FFT and ndimage paths must agree everywhere, edges included."""
+        rng = np.random.RandomState(0)
+        data = np.cumsum(rng.randn(400, 5), axis=0)
+        window = motion_mag._flattop_window(width)
+        assert len(window) % 2 == 1
+        with patch.object(motion_mag, "_FFT_THRESHOLD", 0):
+            fft = motion_mag.flattop_filter_1d(data, width)
+        direct = ndimage.convolve1d(data, window, axis=0, mode="reflect")
+        np.testing.assert_allclose(fft, direct, atol=1e-10)
+
+    def test_linear_drift_passes_without_lag(self):
+        """A zero-phase filter leaves a linear ramp unchanged in the interior."""
+        data = np.arange(400, dtype=np.float64)[:, None] * 0.05 * np.ones((1, 3))
+        out = motion_mag.flattop_filter_1d(data, 80)
+        half = len(motion_mag._flattop_window(80)) // 2
+        np.testing.assert_allclose(out[half:-half], data[half:-half], atol=1e-10)
 
     def test_small_width_no_crash(self):
         """Very small width should not crash (window_size guard)."""

@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - CPU peak RAM on face.mp4 cut from 8.3 GiB to 2.9 GiB (float32/complex64, chunked phase filtering, uint8 frames); `estimate_memory()` uses the real coefficient count and is now called from `main()` (#26)
 - GPU Docker image ran the CPU path by default; its entrypoint now passes `--gpu`, and the CLI prints the active backend (#27)
 - Notebook failed on SciPy >= 1.13 and wrapped pixel values; it now calls `motion_mag` instead of keeping its own copy of the algorithm (#28)
+- Temporal filter was half a frame off centre (even window lengths) and the FFT and direct paths handled clip edges differently; windows are now always odd and all paths use the same boundary rule. Output changes slightly, mostly near the first and last frames (#29)
 
 ## [2.0.0] - 2026-03-21
 
