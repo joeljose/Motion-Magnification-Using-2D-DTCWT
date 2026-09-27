@@ -274,6 +274,25 @@ class TestLoadVideoBufferGuard:
         assert fps == 30.0
 
 
+class TestSaveVideo:
+    def test_raises_when_writer_cannot_open(self, tmp_path):
+        channels = [np.zeros((2, 8, 8)) for _ in range(3)]
+        mock_writer = MagicMock()
+        mock_writer.isOpened.return_value = False
+        with patch("cv2.VideoWriter", return_value=mock_writer):
+            with pytest.raises(RuntimeError, match="could not open video writer"):
+                motion_mag.save_video(channels, 30.0, str(tmp_path / "o.avi"), (8, 8))
+        mock_writer.write.assert_not_called()
+
+    def test_writes_readable_file(self, tmp_path):
+        channels = [np.full((3, 16, 16), 100.0) for _ in range(3)]
+        path = str(tmp_path / "o.avi")
+        motion_mag.save_video(channels, 30.0, path, (16, 16))
+        cap = cv2.VideoCapture(path)
+        assert int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) == 3
+        cap.release()
+
+
 # ---------------------------------------------------------------------------
 # Input validation tests
 # ---------------------------------------------------------------------------
@@ -330,6 +349,13 @@ class TestInputValidation:
         code, stderr = run_cli("-i", "nonexistent.mp4")
         assert code == 1
         assert "not found" in stderr
+
+    def test_missing_output_directory(self, dummy_video, tmp_path):
+        out = str(tmp_path / "no" / "such" / "dir" / "out.avi")
+        code, stderr = run_cli("-i", dummy_video, "-o", out)
+        assert code == 1
+        assert "output directory does not exist" in stderr
+        assert "Traceback" not in stderr
 
     def test_magnification_zero(self, dummy_video):
         code, stderr = run_cli("-i", dummy_video, "-k", "0")
