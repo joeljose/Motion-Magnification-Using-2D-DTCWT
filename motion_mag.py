@@ -242,45 +242,60 @@ def load_video(path):
     processing converts one channel at a time, which keeps memory low.
     OpenCV reads in BGR order; channels are split accordingly.
 
+    Frames are read until the decoder stops, so a container that
+    under-reports its frame count loses nothing.
+
     Args:
         path: Path to the video file.
 
     Returns:
         Tuple of (channels, fps, frame_size) where:
         - channels: list of 3 numpy arrays [R, G, B], each (N, H, W) uint8
-        - fps: frame rate as integer
+        - fps: frame rate reported by the container (float; 0 if unknown)
         - frame_size: (width, height) tuple
+
+    Raises:
+        ValueError: If the file cannot be opened or has no decodable frames.
     """
     cap = cv2.VideoCapture(path)
     try:
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if not cap.isOpened():
+            raise ValueError(f"cannot open video: {path}")
+        reported = max(0, int(cap.get(cv2.CAP_PROP_FRAME_COUNT)))
         fps = cap.get(cv2.CAP_PROP_FPS)
 
-        # Read all frames into a single array, then split channels
-        frames = np.zeros((frame_count, height, width, 3), dtype=np.uint8)
+        frames = None
         i = 0
         t_start = time.time()
-        while cap.isOpened():
-            if i >= frame_count:
-                break
+        while True:
             ret, frame = cap.read()
             if not ret:
                 break
+            if frames is None:
+                frames = np.empty((max(reported, 1),) + frame.shape, dtype=np.uint8)
+            elif i == len(frames):
+                # More frames than reported: grow the buffer by half again
+                grow = np.empty((len(frames) // 2 + 1,) + frame.shape, dtype=np.uint8)
+                frames = np.concatenate([frames, grow])
             frames[i] = frame
             i += 1
 
-            if (i) % max(1, frame_count // 10) == 0:
+            if reported and i <= reported and i % max(1, reported // 10) == 0:
                 elapsed = time.time() - t_start
-                pct = i / frame_count
+                pct = i / reported
                 eta = elapsed / pct * (1 - pct)
-                print(f"  Reading: {i}/{frame_count} frames "
+                print(f"  Reading: {i}/{reported} frames "
                       f"({pct:.0%}) — {format_duration(eta)} remaining")
     finally:
         cap.release()
 
+    if i == 0:
+        raise ValueError(f"no decodable frames in {path}")
+    if abs(i - reported) > 1:
+        print(f"  Note: container reported {reported} frames, decoded {i}")
+
     frames = frames[:i]
+    height, width = frames.shape[1:3]
 
     # Split BGR channels into separate contiguous uint8 arrays
     channels = [
@@ -765,6 +780,10 @@ def magnify_motions(data, magnification=3.0, width=80, nlevels=8,
     return result
 
 
+# Fewer frames than this leave nothing for the temporal filter to separate
+_MIN_FRAMES = 3
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Phase-Based Motion Magnification Using 2D DTCWT — "
@@ -802,6 +821,10 @@ def main():
         help='Number of DTCWT decomposition levels (default: 8)'
     )
     parser.add_argument(
+        '--fps', type=float, default=None,
+        help='Frame rate of the output (default: from the input video)'
+    )
+    parser.add_argument(
         '--gpu', action='store_true',
         help='Use GPU acceleration (requires PyTorch + pytorch_wavelets)'
     )
@@ -837,6 +860,10 @@ def main():
         print("Error: --nlevels must be at least 1", file=sys.stderr)
         sys.exit(1)
 
+    if args.fps is not None and not args.fps > 0:
+        print("Error: --fps must be positive", file=sys.stderr)
+        sys.exit(1)
+
     # --- GPU validation ---
     if args.gpu:
         try:
@@ -870,8 +897,22 @@ def main():
     # --- Load video ---
     total_start = time.time()
     print(f"Loading {args.input}...")
-    channels, fps, frame_size = load_video(args.input)
+    try:
+        channels, fps, frame_size = load_video(args.input)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
     frame_count = channels[0].shape[0]
+    if args.fps is not None:
+        fps = args.fps
+    elif not (np.isfinite(fps) and fps > 0):
+        print(f"Error: could not read the frame rate of {args.input}; "
+              f"pass --fps", file=sys.stderr)
+        sys.exit(1)
+    if frame_count < _MIN_FRAMES:
+        print(f"Error: need at least {_MIN_FRAMES} frames for temporal "
+              f"filtering, got {frame_count}", file=sys.stderr)
+        sys.exit(1)
     print(f"  {frame_count} frames, {frame_size[0]}x{frame_size[1]}, {fps} fps")
 
     need, _ = estimate_memory(frame_count, frame_size[1], frame_size[0],

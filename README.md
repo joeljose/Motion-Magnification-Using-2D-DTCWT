@@ -327,6 +327,7 @@ python motion_mag.py -i face.mp4 --gpu -k 5 --biort near_sym_a --qshift qshift_a
 | `-k / --magnification` | 3 | Magnification factor |
 | `-w / --width` | 80 | Temporal filter width (frames) |
 | `--nlevels` | 8 | DTCWT decomposition levels |
+| `--fps` | from input | Output frame rate; required when the input doesn't report one |
 | `--gpu` | off | Enable GPU acceleration (requires PyTorch + pytorch_wavelets) |
 | `--device` | 0 | CUDA device index (for multi-GPU systems) |
 | `--biort` | `near_sym_b` | Biorthogonal wavelet filter for DTCWT level 1 |
