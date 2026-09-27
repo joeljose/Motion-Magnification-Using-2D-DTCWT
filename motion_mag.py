@@ -54,8 +54,8 @@ def normalize_phase(x):
 def extract_temporal_phases(pyramids, level):
     """Extract cumulative phase evolution across frames at a given DTCWT level.
 
-    Computes frame-to-frame phase changes via complex division (more
-    numerically stable than phase subtraction), then takes the cumulative
+    Computes frame-to-frame phase changes via conjugate multiplication (no
+    phase wrapping, unlike subtracting angles), then takes the cumulative
     sum to get absolute phase relative to frame 0.
 
     Memory-efficient: computes angle() per frame into a pre-allocated float64
@@ -81,13 +81,10 @@ def extract_temporal_phases(pyramids, level):
 
     for i in range(1, num_frames):
         curr_phase = normalize_phase(pyramids[i].highpasses[level].flatten())
-        # Complex division gives frame-to-frame phase ratio;
-        # suppress warnings from near-zero coefficients (result is harmless)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            ratio = curr_phase / prev_phase
-        # np.angle returns 0 for NaN/Inf inputs, so zero-magnitude
-        # coefficients contribute zero phase change as desired
-        angles[i, :] = np.angle(ratio)
+        # Conjugate multiply gives the frame-to-frame phase change. A zero
+        # coefficient gives angle(0) = 0 (no change); a division would give
+        # 0/0 = NaN, which spreads through cumsum and the inverse transform.
+        angles[i, :] = np.angle(curr_phase * np.conj(prev_phase))
         prev_phase = curr_phase
 
     # Accumulate to get absolute phase relative to frame 0
@@ -634,7 +631,7 @@ def magnify_motions(data, magnification=3.0, width=80, nlevels=8,
 
     The algorithm:
     1. Forward 2D DTCWT — decompose each frame into nlevels scales x 6 orientations
-    2. Phase extraction — cumulative phase relative to frame 0 via complex division
+    2. Phase extraction — cumulative phase relative to frame 0 via conjugate multiply
     3. Temporal filtering — flat-top low-pass separates base motion from detail
     4. Phase modification — amplify detail: phase0 + (phase - phase0) * k
     5. Smoothing — additional low-pass (width=2) removes high-freq phase noise

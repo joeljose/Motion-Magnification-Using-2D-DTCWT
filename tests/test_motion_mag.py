@@ -126,6 +126,27 @@ class TestExtractTemporalPhases:
         assert phases.shape == (5, num_coeffs)
         assert phases.dtype == np.float64
 
+    def test_zero_coefficients_give_finite_phase(self):
+        """Exact-zero coefficients (e.g. a black border) must not give NaN."""
+        transform = dtcwt.Transform2d()
+        rng = np.random.RandomState(0)
+        frames = rng.rand(6, 32, 32)
+        frames[:, :, :8] = 0.0
+        pyramids = [transform.forward(f, nlevels=2) for f in frames]
+        assert np.any(pyramids[0].highpasses[0] == 0)
+
+        phases = motion_mag.extract_temporal_phases(pyramids, level=0)
+        assert np.isfinite(phases).all()
+
+
+def test_magnify_motions_zero_region_is_finite():
+    """A clip with an all-zero region must reconstruct without NaN."""
+    rng = np.random.RandomState(0)
+    data = rng.rand(8, 32, 32) * 255
+    data[:, :8, :] = 0.0
+    result = motion_mag.magnify_motions(data, magnification=3.0, width=3, nlevels=2)
+    assert np.isfinite(result).all()
+
 
 # ---------------------------------------------------------------------------
 # Memory estimation
