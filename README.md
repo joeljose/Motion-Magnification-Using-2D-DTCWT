@@ -266,7 +266,7 @@ python motion_mag.py -i face.mp4
 **Notebook** (for interactive exploration and learning):
 
 ```bash
-pip install -r requirements.txt requests
+pip install -r requirements.txt jupyter matplotlib
 jupyter notebook MotionMagDtcwt.ipynb
 ```
 
@@ -339,7 +339,7 @@ python motion_mag.py -i face.mp4 --gpu -k 5 --biort near_sym_a --qshift qshift_a
 
 ### Notebook
 
-Open the notebook and run all cells. By default, it downloads a sample face video from the original paper and magnifies it. To use your own video, change the `filename` variable.
+Open the notebook and run all cells. It calls `motion_mag.py` (cloning the repository first when run on Colab), magnifies the bundled `face.mp4`, saves `face_k3.avi`, and plots a before/after comparison. To use your own video, change the `filename` variable.
 
 ### Tips
 
