@@ -383,27 +383,27 @@ All tests run inside Docker — no local Python dependencies needed:
 ```
 
 **CPU tests** (`tests/test_motion_mag.py`) cover:
-- Phase normalization (unit magnitude, zero safety)
-- Flat-top temporal filter (DC passthrough, smoothing, edge cases)
-- Temporal phase extraction (constant phase, output shape)
-- `magnify_motions` smoke tests (shape, dtype, finite values)
-- `load_video` buffer safety
+- Phase normalization and temporal phase extraction, including exact-zero coefficients
+- Flat-top temporal filter: FFT path equal to direct convolution (edges included), zero-phase on a linear ramp
+- `magnify_motions`: k=1 reproduces a static clip, a sub-pixel oscillation is magnified about k times, odd frame sizes, uint8 input
+- **Golden regression**: a 20-frame crop of face.mp4 must match `tests/data/golden_face.npz` (PSNR >= 60 dB). Regenerate it with `python scripts/make_golden.py` only for intended output changes, and note them in CHANGELOG.md
+- Memory estimation arithmetic
+- `load_video` / `save_video` error handling, and CLI runs on a real 12-frame clip (output frame count and size checked)
 - All CLI input validation error paths
 
 **GPU tests** (`tests/test_motion_mag_gpu.py`) cover:
-- GPU forward/inverse DTCWT roundtrip
+- GPU forward/inverse DTCWT roundtrip (float32 precision)
 - Phase extraction (finite values, correct shapes)
 - Batched vs single-batch consistency (cross-batch boundary verification)
 - cuFFT temporal filter (shape preservation, DC signal handling)
-- Full GPU pipeline smoke test (finite output, correct dimensions)
-- Memory estimation arithmetic
+- Full GPU pipeline smoke test (finite output, correct dimensions, odd frame sizes)
 - All GPU tests skip automatically on systems without CUDA
 
 **Dev workflow:**
 1. Make your changes
 2. Run `./test.sh` (and `./test.sh gpu` if touching GPU code)
 3. If all tests pass, commit and open a PR
-4. CI runs lint + smoke tests automatically
+4. CI runs lint, the unit tests and a full run on face.mp4 automatically
 
 ### Versioning
 

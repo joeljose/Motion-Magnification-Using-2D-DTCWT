@@ -183,11 +183,10 @@ class TestGpuInversePass:
             data, phases, nlevels=nlevels, biort='near_sym_b', qshift='qshift_b',
             device=device,
         )
-        # Should be close to input (phase extraction + reconstruction roundtrip)
-        # Not exact due to atan2 phase extraction losing information at
-        # near-zero magnitude coefficients. Check mean error is small.
+        # Unmodified phases must reconstruct the input to float32 precision
+        # (measured mean error 1e-7 on [0, 1] data)
         mean_err = np.mean(np.abs(data - result))
-        assert mean_err < 0.5, f"Identity roundtrip mean error too large: {mean_err}"
+        assert mean_err < 1e-5, f"Identity roundtrip mean error too large: {mean_err}"
 
 
 class TestMagnifyMotionsGpu:
