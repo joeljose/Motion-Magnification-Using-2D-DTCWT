@@ -17,7 +17,6 @@ pytestmark = pytest.mark.skipif(not HAS_CUDA, reason="No CUDA GPU available")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import motion_mag  # noqa: E402
 
-
 # ---------------------------------------------------------------------------
 # Tier 2: GPU forward pass
 # ---------------------------------------------------------------------------

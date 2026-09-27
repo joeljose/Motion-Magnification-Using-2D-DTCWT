@@ -1,8 +1,8 @@
 """Unit tests for motion_mag.py — Phase-Based Motion Magnification."""
 
+import os
 import subprocess
 import sys
-import os
 from unittest.mock import MagicMock, patch
 
 import cv2
@@ -12,7 +12,6 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import motion_mag
-
 
 # ---------------------------------------------------------------------------
 # Helpers
