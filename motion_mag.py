@@ -93,8 +93,12 @@ def extract_temporal_phases(pyramids, level):
 
 
 def _flattop_window(width):
-    """Compute a normalized flat-top window for the given filter width."""
-    window_size = max(1, round(width / 0.2327))
+    """Compute a normalized flat-top window for the given filter width.
+
+    The length is forced odd so the window has a centre tap and the filter
+    is zero-phase; an even length shifts the output by half a frame.
+    """
+    window_size = max(1, round(width / 0.2327)) | 1
     window = signal.windows.flattop(window_size)
     return window / np.sum(window)
 
@@ -102,6 +106,11 @@ def _flattop_window(width):
 # Threshold: windows larger than this use FFT convolution (faster for large
 # kernels due to O(n log n) vs O(n*k) complexity).
 _FFT_THRESHOLD = 32
+
+# np.pad modes matching each ndimage boundary mode ('reflect' in ndimage
+# repeats the edge sample, which is 'symmetric' in np.pad)
+_NP_PAD_MODE = {'reflect': 'symmetric', 'mirror': 'reflect', 'nearest': 'edge',
+                'constant': 'constant', 'wrap': 'wrap'}
 
 
 def flattop_filter_1d(data, width, axis=0, mode='reflect'):
@@ -130,10 +139,12 @@ def flattop_filter_1d(data, width, axis=0, mode='reflect'):
     if len(window) <= _FFT_THRESHOLD:
         return ndimage.convolve1d(data, window, axis=axis, mode=mode)
 
-    # FFT path: manually reflect-pad, then use fftconvolve in chunks
+    # FFT path: pad with the same boundary rule as ndimage (see
+    # _NP_PAD_MODE), then use fftconvolve in chunks
     # for cache efficiency. Chunking along the non-convolution axis
     # keeps working sets in L2/L3 cache.
     pad_size = len(window) // 2
+    pad_mode = _NP_PAD_MODE[mode]
     n_along = data.shape[axis]
     n_across = data.size // n_along
     chunk_size = min(n_across, 10000)
@@ -151,13 +162,13 @@ def flattop_filter_1d(data, width, axis=0, mode='reflect'):
         for start in range(0, data.shape[1], chunk_size):
             end = min(start + chunk_size, data.shape[1])
             chunk = data[:, start:end]
-            padded = np.pad(chunk, [(pad_size, pad_size), (0, 0)], mode=mode)
+            padded = np.pad(chunk, [(pad_size, pad_size), (0, 0)], mode=pad_mode)
             conv = signal.fftconvolve(padded, kernel, mode='same', axes=0)
             result[:, start:end] = conv[pad_size:pad_size + n_along]
         return result
 
     # General fallback: no chunking
-    padded = np.pad(data, pad_widths, mode=mode)
+    padded = np.pad(data, pad_widths, mode=pad_mode)
     conv = signal.fftconvolve(padded, kernel, mode='same', axes=axis)
     slices = [slice(None)] * data.ndim
     slices[axis] = slice(pad_size, pad_size + n_along)
@@ -618,10 +629,11 @@ def _gpu_temporal_filter(phase_arrays, magnification, width, device):
         for start in range(0, num_coeffs, chunk_size):
             end = min(start + chunk_size, num_coeffs)
 
-            # Reflect-pad along time axis on CPU before GPU transfer
+            # Pad along time on CPU before GPU transfer, with the same
+            # boundary rule as the CPU path (ndimage 'reflect')
             chunk_np = phase[:, start:end]
             chunk_padded = np.pad(chunk_np, [(pad_size, pad_size), (0, 0)],
-                                  mode='reflect')
+                                  mode='symmetric')
             chunk = torch.from_numpy(chunk_padded).to(device)
             del chunk_padded
 
