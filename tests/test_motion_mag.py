@@ -250,6 +250,21 @@ class TestMagnifyMotions:
         assert result.shape == data.shape
         assert result.dtype == np.float32
 
+    @pytest.mark.parametrize("shape", [(6, 31, 33), (6, 32, 33)])
+    def test_odd_frame_size(self, shape):
+        """dtcwt pads odd sizes; the output must be cropped back."""
+        data = np.random.RandomState(0).rand(*shape) * 255
+        result = motion_mag.magnify_motions(data, magnification=3.0, width=3, nlevels=2)
+        assert result.shape == data.shape
+        assert np.isfinite(result).all()
+
+    def test_odd_frame_size_identity(self):
+        """With k=1 an odd-sized static clip reconstructs to the input."""
+        frame = np.random.RandomState(0).rand(31, 33) * 255
+        data = np.repeat(frame[None], 6, axis=0)
+        result = motion_mag.magnify_motions(data, magnification=1.0, width=3, nlevels=2)
+        np.testing.assert_allclose(result, data, atol=1e-2)
+
     def test_values_finite(self):
         rng = np.random.RandomState(42)
         data = rng.rand(5, 16, 16).astype(np.float64)
