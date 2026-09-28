@@ -25,6 +25,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_compl
 import cv2
 import dtcwt
 import numpy as np
+from scipy import fft as sp_fft
 from scipy import ndimage, signal
 
 
@@ -176,6 +177,48 @@ def flattop_filter_1d(data, width, axis=0, mode='reflect'):
     slices = [slice(None)] * data.ndim
     slices[axis] = slice(pad_size, pad_size + n_along)
     return conv[tuple(slices)]
+
+
+def _band_mask(n_fft, low, high):
+    """rfft bins of an n_fft-point transform inside [low, high] cycles/frame."""
+    f = sp_fft.rfftfreq(n_fft)
+    return (f >= low) & (f <= high)
+
+
+def bandpass_1d(data, low, high):
+    """Ideal temporal band-pass along axis 0.
+
+    Keeps frequencies in [low, high] (cycles per frame, i.e. Hz / fps) and
+    removes everything else. The series is extended symmetrically by its own
+    length on both ends first, so the FFT's wrap-around doesn't join the
+    last frame to the first.
+
+    Args:
+        data: Array (num_frames, ...), filtered along axis 0.
+        low, high: Band edges in cycles per frame, 0 <= low < high <= 0.5.
+
+    Returns:
+        Array of the same shape and precision as `data`.
+    """
+    n = data.shape[0]
+    padded = np.pad(data, [(n, n)] + [(0, 0)] * (data.ndim - 1), mode='symmetric')
+    n_fft = sp_fft.next_fast_len(padded.shape[0], real=True)
+    spectrum = sp_fft.rfft(padded, n_fft, axis=0)
+    spectrum[~_band_mask(n_fft, low, high)] = 0
+    return sp_fft.irfft(spectrum, n_fft, axis=0)[n:2 * n].astype(data.dtype, copy=False)
+
+
+def flattop_band(width):
+    """Half-amplitude points (cycles per frame) of the flat-top pipeline.
+
+    The low edge is where the width-`width` baseline filter drops to 0.5 (so
+    detail motion is amplified above it); the high edge is where the fixed
+    width-2 smoothing filter drops to 0.5. Multiply by fps for Hz.
+    """
+    def half_amplitude(w):
+        f, h = signal.freqz(_flattop_window(w), worN=1 << 16, fs=1.0)
+        return float(f[np.argmax(np.abs(h) < 0.5)])
+    return half_amplitude(width), half_amplitude(2.0)
 
 
 def estimate_memory(num_frames, height, width, nlevels, gpu=False, jobs=2):
@@ -486,7 +529,7 @@ def _gpu_forward_pass(data, nlevels, biort, qshift, device):
     return delta_arrays
 
 
-def _gpu_temporal_filter(phase_arrays, magnification, width, device):
+def _gpu_temporal_filter(phase_arrays, magnification, width, device, band=None):
     """GPU temporal filtering via chunked cuFFT.
 
     Applies flat-top window filtering and phase modification in-place.
@@ -498,8 +541,13 @@ def _gpu_temporal_filter(phase_arrays, magnification, width, device):
         magnification: Amplification factor for phase detail.
         width: Temporal filter width in frames.
         device: torch.device (CUDA, or CPU for testing).
+        band: Optional (low, high) in cycles per frame; see magnify_motions.
     """
     import torch
+
+    if band is not None:
+        _gpu_bandpass_filter(phase_arrays, magnification, band, device)
+        return
 
     large_window = _flattop_window(width)
     small_window = _flattop_window(2.0)
@@ -561,6 +609,30 @@ def _gpu_temporal_filter(phase_arrays, magnification, width, device):
             # Trim padding, write back
             phase[:, start:end] = chunk[pad_size:pad_size + num_frames].cpu().numpy()
             del chunk
+            torch.cuda.empty_cache()
+
+        _run_batches(phase.shape[1], chunk_size, process, "chunk")
+
+
+def _gpu_bandpass_filter(phase_arrays, magnification, band, device):
+    """GPU version of the band mode: phase += (k - 1) * bandpass(phase)."""
+    import torch
+
+    num_frames = phase_arrays[0].shape[0]
+    n_fft = sp_fft.next_fast_len(3 * num_frames, real=True)
+    mask = torch.from_numpy(_band_mask(n_fft, *band)).to(device).unsqueeze(1)
+    chunk_size = max(64, int(_free_memory(device) * 0.5 / (n_fft * 40)))
+
+    for phase in phase_arrays:
+        def process(start, end):
+            padded = np.pad(phase[:, start:end], [(num_frames, num_frames), (0, 0)],
+                            mode='symmetric')
+            chunk = torch.from_numpy(padded).to(device)
+            spectrum = torch.fft.rfft(chunk, n=n_fft, dim=0) * mask
+            detail = torch.fft.irfft(spectrum, n=n_fft, dim=0)[num_frames:2 * num_frames]
+            del spectrum, chunk
+            phase[:, start:end] += (detail * (magnification - 1)).cpu().numpy()
+            del detail
             torch.cuda.empty_cache()
 
         _run_batches(phase.shape[1], chunk_size, process, "chunk")
@@ -641,7 +713,7 @@ def _gpu_inverse_pass(data, phase_arrays, nlevels, biort, qshift, device):
 
 
 def magnify_motions_gpu(data, magnification=3.0, width=80, nlevels=8,
-                        biort='near_sym_b', qshift='qshift_b', device=None):
+                        biort='near_sym_b', qshift='qshift_b', device=None, band=None):
     """GPU-accelerated phase-based motion magnification on a single channel.
 
     Two-pass pipeline:
@@ -662,6 +734,7 @@ def magnify_motions_gpu(data, magnification=3.0, width=80, nlevels=8,
         biort: Biorthogonal filter name.
         qshift: Quarter-shift filter name.
         device: torch.device (default CUDA; CPU works too, for testing).
+        band: Optional (low, high) in cycles per frame; see magnify_motions.
 
     Returns:
         3D numpy array of same shape as input with magnified motions, float32.
@@ -680,7 +753,7 @@ def magnify_motions_gpu(data, magnification=3.0, width=80, nlevels=8,
     # Temporal filtering
     print("  GPU Temporal filtering...")
     t0 = time.time()
-    _gpu_temporal_filter(phase_arrays, magnification, width, device)
+    _gpu_temporal_filter(phase_arrays, magnification, width, device, band=band)
     print(f"    Done in {format_duration(time.time() - t0)}")
 
     # Pass 2: Reconstruction + inverse DTCWT
@@ -780,7 +853,7 @@ def _default_jobs(jobs):
 
 
 def magnify_motions(data, magnification=3.0, width=80, nlevels=8,
-                    biort='near_sym_b', qshift='qshift_b', jobs=None):
+                    biort='near_sym_b', qshift='qshift_b', jobs=None, band=None):
     """Run the phase-based motion magnification pipeline on a single channel.
 
     The algorithm:
@@ -810,6 +883,10 @@ def magnify_motions(data, magnification=3.0, width=80, nlevels=8,
         biort: Biorthogonal filter for DTCWT level 1 (default: 'near_sym_b').
         qshift: Quarter-shift filter for DTCWT levels 2+ (default: 'qshift_b').
         jobs: Worker processes/threads (default: 2; 1 = serial).
+        band: Optional (low, high) in cycles per frame (Hz / fps). If given,
+            an ideal band-pass replaces steps 3-5: motion inside the band is
+            multiplied by `magnification`, motion outside is left unchanged,
+            and `width` is ignored.
 
     Returns:
         float32 array of the same shape as the input, with magnified motions.
@@ -844,6 +921,12 @@ def magnify_motions(data, magnification=3.0, width=80, nlevels=8,
 
             # Step 2: Extract cumulative temporal phase
             phase = temporal_phase(chunk)
+
+            if band is not None:
+                # Steps 3-5 as one band-pass: amplify only in-band motion
+                phase += np.float32(magnification - 1) * bandpass_1d(phase, *band)
+                chunk[:] = np.abs(chunk) * np.exp(1j * phase)
+                return
 
             # Step 3: Temporal filtering — separate base motion from detail
             phase0 = flattop_filter_1d(phase, width, axis=0, mode='reflect')
@@ -953,8 +1036,17 @@ def main():
         help='Magnification factor (default: 3)'
     )
     parser.add_argument(
-        '-w', '--width', type=float, default=80,
-        help='Temporal filter width in frames (default: 80)'
+        '-w', '--width', type=float, default=None,
+        help='Temporal filter width in frames (default: 80). Deprecated: '
+             'prefer --freq-low/--freq-high'
+    )
+    parser.add_argument(
+        '--freq-low', type=float, default=None,
+        help='Lower edge of the amplified band in Hz (use with --freq-high)'
+    )
+    parser.add_argument(
+        '--freq-high', type=float, default=None,
+        help='Upper edge of the amplified band in Hz (use with --freq-low)'
     )
     parser.add_argument(
         '--nlevels', type=int, default=8,
@@ -1001,9 +1093,29 @@ def main():
         print("Error: --magnification must be positive and finite", file=sys.stderr)
         sys.exit(1)
 
-    if not (np.isfinite(args.width) and args.width > 0):
+    if args.width is not None and not (np.isfinite(args.width) and args.width > 0):
         print("Error: --width must be positive and finite", file=sys.stderr)
         sys.exit(1)
+
+    band_mode = args.freq_low is not None or args.freq_high is not None
+    if band_mode:
+        if args.freq_low is None or args.freq_high is None:
+            print("Error: --freq-low and --freq-high must be given together",
+                  file=sys.stderr)
+            sys.exit(1)
+        if args.width is not None:
+            print("Error: use either -w/--width or --freq-low/--freq-high, not both",
+                  file=sys.stderr)
+            sys.exit(1)
+        if not (np.isfinite(args.freq_low) and np.isfinite(args.freq_high)
+                and 0 < args.freq_low < args.freq_high):
+            print("Error: need 0 < --freq-low < --freq-high", file=sys.stderr)
+            sys.exit(1)
+    elif args.width is not None:
+        print("Note: -w/--width is deprecated; prefer --freq-low/--freq-high (Hz).",
+              file=sys.stderr)
+    else:
+        args.width = 80.0
 
     if args.nlevels < 1:
         print("Error: --nlevels must be at least 1", file=sys.stderr)
@@ -1090,7 +1202,19 @@ def main():
     print(f"  Backend:         {backend}")
     print(f"  Color space:     {args.color_space}")
     print(f"  Magnification:   {args.magnification}x")
-    print(f"  Filter width:    {args.width}")
+    if band_mode:
+        if args.freq_high > fps / 2:
+            print(f"Error: --freq-high {args.freq_high:g} Hz is above the Nyquist "
+                  f"frequency ({fps / 2:g} Hz at {fps:g} fps)", file=sys.stderr)
+            sys.exit(1)
+        band = (args.freq_low / fps, args.freq_high / fps)
+        print(f"  Band:            {args.freq_low:g}–{args.freq_high:g} Hz "
+              f"(ideal band-pass)")
+    else:
+        band = None
+        low, high = flattop_band(args.width)
+        print(f"  Band:            ~{low * fps:.2f}–{high * fps:.2f} Hz "
+              f"(flat-top, width {args.width:g})")
     print(f"  DTCWT levels:    {args.nlevels}")
     print(f"  Biort filter:    {args.biort}")
     print(f"  Qshift filter:   {args.qshift}\n")
@@ -1113,6 +1237,7 @@ def main():
                 biort=args.biort,
                 qshift=args.qshift,
                 jobs=args.jobs,
+                band=band,
             )
         try:
             return magnify_motions_gpu(
@@ -1123,6 +1248,7 @@ def main():
                 biort=args.biort,
                 qshift=args.qshift,
                 device=device,
+                band=band,
             )
         except torch.cuda.OutOfMemoryError:
             print("Error: out of GPU memory even with single-frame batches. "

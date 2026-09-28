@@ -315,3 +315,18 @@ def test_gpu_path_agrees_with_cpu_path():
     gpu = motion_mag.magnify_motions_gpu(data, device=DEVICE, **kwargs)
     mse = np.mean((cpu.astype(np.float64) - gpu) ** 2)
     assert 10 * np.log10(255 ** 2 / mse) >= 60
+
+
+def test_band_mode_agrees_with_cpu_path():
+    from scipy import ndimage
+    base = ndimage.gaussian_filter(np.random.RandomState(0).rand(48, 48), 1.5) * 255
+    spectrum = np.fft.fft2(base)
+    t = np.arange(90)
+    shifts = 0.05 * np.sin(2 * np.pi * t / 25) + 0.05 * np.sin(2 * np.pi * t / 5)
+    data = np.stack([np.real(np.fft.ifft2(ndimage.fourier_shift(spectrum, (0, s))))
+                     for s in shifts]).astype(np.float32)
+    kwargs = dict(magnification=10.0, nlevels=3, band=(0.8 / 30, 2.0 / 30))
+    cpu = motion_mag.magnify_motions(data, **kwargs)
+    gpu = motion_mag.magnify_motions_gpu(data, device=DEVICE, **kwargs)
+    mse = np.mean((cpu.astype(np.float64) - gpu) ** 2)
+    assert 10 * np.log10(255 ** 2 / mse) >= 60
