@@ -1,7 +1,7 @@
 # Pin PyTorch 2.1.2 because pytorch_wavelets is unmaintained (last commit 2022)
 # and uses old-style autograd.Function. Tested working with 2.1.2.
 # numpy<2 is required by both pytorch_wavelets and dtcwt (removed NumPy 2.0 APIs).
-FROM pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime@sha256:3387e598cb94fc248d82e712a65b10931a990cea3a2e76362ca30d135f565de4
+FROM pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime@sha256:fc47f8018254e6df30f48c48f2db1c758d44de21a8c553de1a1c451a65baa70a
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends git && \
