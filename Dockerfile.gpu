@@ -1,34 +1,34 @@
 # Pin PyTorch 2.1.2 because pytorch_wavelets is unmaintained (last commit 2022)
 # and uses old-style autograd.Function. Tested working with 2.1.2.
-# numpy<2 required because pytorch_wavelets uses removed NumPy 2.0 APIs.
-FROM pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime
+# numpy<2 is required by both pytorch_wavelets and dtcwt (removed NumPy 2.0 APIs).
+FROM pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime@sha256:3387e598cb94fc248d82e712a65b10931a990cea3a2e76362ca30d135f565de4
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends libgl1 libglib2.0-0 git && \
+    apt-get install -y --no-install-recommends git && \
     rm -rf /var/lib/apt/lists/*
 
-ARG UID
-ARG GID
-ARG UNAME
-
-RUN groupadd -g ${GID} ${UNAME} && \
-    useradd -m -u ${UID} -g ${GID} ${UNAME}
+# Fixed non-root user; for bind mounts run with --user "$(id -u):$(id -g)"
+RUN useradd -m -u 1000 app
 
 WORKDIR /app
 
-COPY requirements-gpu.txt requirements-dev.txt pyproject.toml ./
-RUN pip install --no-cache-dir -r requirements-gpu.txt -r requirements-dev.txt && \
-    pip install --no-cache-dir git+https://github.com/fbcotter/pytorch_wavelets.git
+# Hash-locked dependencies (torch comes from the base image). pytorch_wavelets
+# is pinned to a commit and installed without deps; its deps are in the lock.
+ARG PYTORCH_WAVELETS_SHA=9a0c507f04f43c5397e384bb6be8340169b2fd9a
+COPY requirements-gpu.lock pyproject.toml ./
+RUN pip install --no-cache-dir --require-hashes -r requirements-gpu.lock && \
+    pip install --no-cache-dir --no-deps \
+        "pytorch_wavelets @ git+https://github.com/fbcotter/pytorch_wavelets.git@${PYTORCH_WAVELETS_SHA}"
 
 COPY motion_mag.py .
 COPY tests/ tests/
 COPY scripts/ scripts/
 
-RUN chown -R ${UID}:${GID} /app
+RUN chown -R app:app /app
 
 ARG VERSION
 LABEL version=${VERSION}
 
-USER ${UNAME}
+USER app
 
 ENTRYPOINT ["python", "-u", "motion_mag.py", "--gpu"]
