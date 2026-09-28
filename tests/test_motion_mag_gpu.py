@@ -330,3 +330,9 @@ def test_band_mode_agrees_with_cpu_path():
     gpu = motion_mag.magnify_motions_gpu(data, device=DEVICE, **kwargs)
     mse = np.mean((cpu.astype(np.float64) - gpu) ** 2)
     assert 10 * np.log10(255 ** 2 / mse) >= 60
+
+
+def test_band_mode_empty_band_raises():
+    phases = [np.zeros((301, 10), dtype=np.float32)]
+    with pytest.raises(ValueError, match="contains no frequency bins"):
+        motion_mag._gpu_temporal_filter(phases, 10.0, 80, DEVICE, band=(0.9 / 30, 0.9001 / 30))
