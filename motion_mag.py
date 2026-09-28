@@ -15,9 +15,12 @@ steerable pyramids.
 __version__ = "2.0.0"
 
 import argparse
+import mmap
+import multiprocessing
 import os
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
 import cv2
 import dtcwt
@@ -51,45 +54,41 @@ def normalize_phase(x):
     return x / magnitude
 
 
+def temporal_phase(coeffs):
+    """Cumulative phase over time for a (num_frames, num_coeffs) array.
+
+    Frame-to-frame phase changes come from conjugate multiplication (no
+    phase wrapping, unlike subtracting angles); their cumulative sum is the
+    phase relative to frame 0. Row 0 holds frame 0's absolute phase, which
+    reconstruction needs. A zero coefficient gives angle(0) = 0 (no change);
+    a division would give 0/0 = NaN.
+
+    Args:
+        coeffs: Complex array (num_frames, num_coeffs), e.g. a column chunk
+            of one DTCWT level.
+
+    Returns:
+        float32 array of the same shape.
+    """
+    unit = normalize_phase(coeffs)
+    angles = np.empty(coeffs.shape, dtype=np.float32)
+    angles[0] = np.angle(unit[0])
+    angles[1:] = np.angle(unit[1:] * np.conj(unit[:-1]))
+    np.cumsum(angles, axis=0, out=angles)
+    return angles
+
+
 def extract_temporal_phases(pyramids, level):
-    """Extract cumulative phase evolution across frames at a given DTCWT level.
-
-    Computes frame-to-frame phase changes via conjugate multiplication (no
-    phase wrapping, unlike subtracting angles), then takes the cumulative
-    sum to get absolute phase relative to frame 0.
-
-    Memory-efficient: computes angle() per frame into a pre-allocated float32
-    array, avoiding a full (num_frames, num_coeffs) complex intermediate.
+    """Cumulative phase over time at one DTCWT level of a list of pyramids.
 
     Args:
         pyramids: List of dtcwt Pyramid objects, one per frame.
         level: DTCWT decomposition level index.
 
     Returns:
-        2D numpy array of shape (num_frames, num_coefficients) containing
-        the cumulative phase angle at each coefficient position over time.
+        float32 array (num_frames, num_coefficients); see temporal_phase().
     """
-    num_frames = len(pyramids)
-    num_coeffs = pyramids[0].highpasses[level].size
-
-    # Allocate float array directly — no full-size complex intermediate
-    angles = np.empty((num_frames, num_coeffs), dtype=np.float32)
-
-    prev_phase = normalize_phase(pyramids[0].highpasses[level].flatten())
-    # Frame 0 stores absolute phase angle (needed for reconstruction)
-    angles[0, :] = np.angle(prev_phase)
-
-    for i in range(1, num_frames):
-        curr_phase = normalize_phase(pyramids[i].highpasses[level].flatten())
-        # Conjugate multiply gives the frame-to-frame phase change. A zero
-        # coefficient gives angle(0) = 0 (no change); a division would give
-        # 0/0 = NaN, which spreads through cumsum and the inverse transform.
-        angles[i, :] = np.angle(curr_phase * np.conj(prev_phase))
-        prev_phase = curr_phase
-
-    # Accumulate to get absolute phase relative to frame 0
-    np.cumsum(angles, axis=0, out=angles)
-    return angles
+    return temporal_phase(np.stack([p.highpasses[level].ravel() for p in pyramids]))
 
 
 def _flattop_window(width):
@@ -156,7 +155,9 @@ def flattop_filter_1d(data, width, axis=0, mode='reflect'):
     pad_widths[axis] = (pad_size, pad_size)
     kernel_shape = [1] * data.ndim
     kernel_shape[axis] = len(window)
-    kernel = window.reshape(kernel_shape)
+    # Match the data's precision so float32 input gets float32 FFTs (half
+    # the memory of float64); float64 input is unchanged
+    kernel = window.astype(np.result_type(data.dtype, np.float32)).reshape(kernel_shape)
 
     # For 2D (frames, coeffs) with axis=0, chunk along axis=1
     if data.ndim == 2 and axis == 0:
@@ -177,7 +178,7 @@ def flattop_filter_1d(data, width, axis=0, mode='reflect'):
     return conv[tuple(slices)]
 
 
-def estimate_memory(num_frames, height, width, nlevels, gpu=False):
+def estimate_memory(num_frames, height, width, nlevels, gpu=False, jobs=2):
     """Estimate peak CPU RAM and VRAM usage in bytes.
 
     Uses the real DTCWT coefficient count (about 2x the pixel count), from a
@@ -189,6 +190,7 @@ def estimate_memory(num_frames, height, width, nlevels, gpu=False):
         width: Frame width in pixels.
         nlevels: Number of DTCWT decomposition levels.
         gpu: If True, estimate for the GPU path; otherwise the CPU path.
+        jobs: CPU worker threads (each holds one phase chunk's temporaries).
 
     Returns:
         Tuple of (cpu_ram_bytes, vram_bytes).
@@ -196,21 +198,22 @@ def estimate_memory(num_frames, height, width, nlevels, gpu=False):
     highpasses = dtcwt.Transform2d().forward(
         np.zeros((height, width)), nlevels=nlevels).highpasses
     coeffs = sum(h.size for h in highpasses)
-    largest_level = max(h.size for h in highpasses)
     pixels = num_frames * height * width
-
     frames_bytes = pixels * 3  # uint8 R, G, B
+
+    # ponytail: constants fitted to face.mp4 (301x592x528, nlevels 8) with
+    # ru_maxrss / cgroup memory.peak; re-fit if the memory layout changes
     if gpu:
-        # float32 input channel + float32 result + float32 phases, all levels
+        # float32 input channel + float32 result + float32 phases, all
+        # levels; 1.2x allocator factor; 640 MiB for imports incl. torch/CUDA
         working = pixels * 4 * 2 + num_frames * coeffs * 4
+        cpu_ram = int((frames_bytes + working) * 1.2) + 640 * 1024**2
     else:
-        # complex64 pyramids for one channel + float32 phases for one level
-        working = num_frames * coeffs * 8 + num_frames * largest_level * 4
-    # ponytail: 1.2x allocator/temporary factor plus import overhead (128 MiB,
-    # +512 MiB for torch/CUDA), fitted to face.mp4 (301x592x528, nlevels 8);
-    # re-fit if the memory layout changes
-    imports = (128 + (512 if gpu else 0)) * 1024**2
-    cpu_ram = int((frames_bytes + working) * 1.2) + imports
+        # shared copy of the input channel + complex64 coefficients + float32
+        # result + ~130 MiB of phase-chunk temporaries per thread; 128 MiB
+        # for imports
+        working = pixels + num_frames * coeffs * 8 + pixels * 4
+        cpu_ram = frames_bytes + working + (jobs * 130 + 128) * 1024**2
 
     # VRAM estimate (GPU only)
     if gpu:
@@ -689,12 +692,95 @@ def magnify_motions_gpu(data, magnification=3.0, width=80, nlevels=8,
     return result
 
 
-# Coefficient columns filtered at a time in magnify_motions
+# Coefficient columns per phase-processing task in magnify_motions; each
+# thread holds a few (num_frames x chunk) temporaries
 _PHASE_CHUNK = 10000
 
 
+def _shared_empty(shape, dtype):
+    """An array in anonymous shared memory, visible to forked workers."""
+    nbytes = max(1, int(np.prod(shape)) * np.dtype(dtype).itemsize)
+    return np.ndarray(shape, dtype, buffer=mmap.mmap(-1, nbytes))
+
+
+# State shared with forked worker processes (set before the pool forks)
+_POOL = {}
+
+
+def _transform(biort, qshift):
+    key = (biort, qshift)
+    if key not in _POOL.setdefault('transforms', {}):
+        _POOL['transforms'][key] = dtcwt.Transform2d(biort=biort, qshift=qshift)
+    return _POOL['transforms'][key]
+
+
+def _forward_block(start, end):
+    """Forward DTCWT of frames [start, end) into the shared level arrays."""
+    st = _POOL['state']
+    transform = _transform(st['biort'], st['qshift'])
+    for i in range(start, end):
+        pyramid = transform.forward(st['data'][i], nlevels=st['nlevels'])
+        st['lowpass'][i] = pyramid.lowpass
+        for level, hp in enumerate(pyramid.highpasses):
+            st['highpasses'][level][i] = hp
+    return end - start
+
+
+def _inverse_block(start, end):
+    """Inverse DTCWT of frames [start, end) into the shared result array."""
+    st = _POOL['state']
+    transform = _transform(st['biort'], st['qshift'])
+    h, w = st['result'].shape[1:]
+    for i in range(start, end):
+        pyramid = dtcwt.Pyramid(st['lowpass'][i],
+                                tuple(hp[i] for hp in st['highpasses']))
+        # dtcwt pads odd sizes by one row/column; crop back to the input size
+        st['result'][i] = transform.inverse(pyramid)[:h, :w]
+    return end - start
+
+
+def _run_frame_blocks(func, num_frames, jobs, label):
+    """Run func(start, end) over frame blocks, in forked processes if jobs > 1."""
+    blocks = max(1, min(num_frames, jobs * 4))
+    bounds = np.linspace(0, num_frames, blocks + 1).astype(int)
+    tasks = [(a, b) for a, b in zip(bounds[:-1], bounds[1:]) if b > a]
+    t_start, done, next_report = time.time(), 0, 0.1
+
+    def report(n):
+        nonlocal done, next_report
+        done += n
+        if done / num_frames >= next_report or done == num_frames:
+            pct = done / num_frames
+            eta = (time.time() - t_start) / pct * (1 - pct)
+            print(f"    {label}: {done}/{num_frames} frames "
+                  f"({pct:.0%}) — {format_duration(eta)} remaining")
+            next_report = pct + 0.1
+
+    if jobs == 1:
+        for a, b in tasks:
+            report(func(a, b))
+        return
+    with ProcessPoolExecutor(jobs, mp_context=multiprocessing.get_context('fork')) as pool:
+        for future in as_completed([pool.submit(func, a, b) for a, b in tasks]):
+            report(future.result())
+
+
+# Default worker count. The dtcwt transforms are memory-bound: on a 6-core
+# laptop (Ryzen 7 7445HS) 2-3 workers were fastest and 4+ were slower than
+# 2, so more is not better by default. Raise --jobs on machines with more
+# memory bandwidth.
+_DEFAULT_JOBS = 2
+
+
+def _default_jobs(jobs):
+    """Worker count: `jobs`, else _DEFAULT_JOBS; 1 where fork is unavailable."""
+    if 'fork' not in multiprocessing.get_all_start_methods():
+        return 1
+    return max(1, min(jobs or _DEFAULT_JOBS, os.cpu_count() or 1))
+
+
 def magnify_motions(data, magnification=3.0, width=80, nlevels=8,
-                    biort='near_sym_b', qshift='qshift_b'):
+                    biort='near_sym_b', qshift='qshift_b', jobs=None):
     """Run the phase-based motion magnification pipeline on a single channel.
 
     The algorithm:
@@ -705,7 +791,13 @@ def magnify_motions(data, magnification=3.0, width=80, nlevels=8,
     5. Smoothing — additional low-pass (width=2) removes high-freq phase noise
     6. Inverse DTCWT — reconstruct with modified phase, preserved amplitude
 
-    Note: All frame pyramids must remain in memory for temporal filtering.
+    The DTCWT steps run in forked worker processes over blocks of frames,
+    writing into shared memory; steps 2-5 run in threads over column chunks
+    of each level (NumPy and SciPy's FFT release the GIL). Every frame and
+    every coefficient column is independent, so the result does not depend
+    on `jobs`.
+
+    Note: All coefficients must remain in memory for temporal filtering.
     They are stored as complex64 and the phase maths runs in float32, which
     roughly halves memory against float64 with no visible difference.
 
@@ -717,80 +809,71 @@ def magnify_motions(data, magnification=3.0, width=80, nlevels=8,
         nlevels: Number of DTCWT decomposition levels (default: 8).
         biort: Biorthogonal filter for DTCWT level 1 (default: 'near_sym_b').
         qshift: Quarter-shift filter for DTCWT levels 2+ (default: 'qshift_b').
+        jobs: Worker processes/threads (default: 2; 1 = serial).
 
     Returns:
         float32 array of the same shape as the input, with magnified motions.
     """
-    transform = dtcwt.Transform2d(biort=biort, qshift=qshift)
-    num_frames = data.shape[0]
-    pyramids = []
+    jobs = _default_jobs(jobs)
+    num_frames, h, w = data.shape
+    probe = _transform(biort, qshift).forward(np.zeros((h, w)), nlevels=nlevels)
 
-    # Step 1: Forward DTCWT
-    print("  Forward DTCWT...")
-    t_start = time.time()
-    for i in range(num_frames):
-        pyramid = transform.forward(data[i, :, :], nlevels=nlevels)
-        pyramid.highpasses = tuple(h.astype(np.complex64) for h in pyramid.highpasses)
-        pyramids.append(pyramid)
+    # Shared arrays: input frames, lowpass and one complex64 array per level
+    shared_data = _shared_empty(data.shape, data.dtype)
+    shared_data[:] = data
+    state = {
+        'data': shared_data, 'biort': biort, 'qshift': qshift, 'nlevels': nlevels,
+        'lowpass': _shared_empty((num_frames,) + probe.lowpass.shape, np.float64),
+        'highpasses': [_shared_empty((num_frames,) + hp.shape, np.complex64)
+                       for hp in probe.highpasses],
+    }
+    _POOL['state'] = state
+    try:
+        # Step 1: Forward DTCWT
+        print(f"  Forward DTCWT ({jobs} {'job' if jobs == 1 else 'jobs'})...")
+        _run_frame_blocks(_forward_block, num_frames, jobs, "forward")
+        state['data'] = None
+        del shared_data
 
-        if (i + 1) % max(1, num_frames // 10) == 0:
-            elapsed = time.time() - t_start
-            pct = (i + 1) / num_frames
-            eta = elapsed / pct * (1 - pct)
-            print(f"    {i + 1}/{num_frames} frames "
-                  f"({pct:.0%}) — {format_duration(eta)} remaining")
+        # Steps 2–5 per level, in threads over column chunks; the
+        # reconstructed coefficients overwrite the originals in place
+        print("  Modifying phase...")
 
-    # Steps 2–5: Phase extraction, filtering, modification
-    print("  Modifying phase...")
-    for level in range(nlevels):
-        print(f"    Level {level + 1}/{nlevels}")
+        def process(coeffs, start):
+            chunk = coeffs[:, start:start + _PHASE_CHUNK]
 
-        # Step 2: Extract cumulative temporal phase
-        phase = extract_temporal_phases(pyramids, level)
-
-        # Steps 3-5 run on column chunks (filtering is per coefficient), so
-        # no full-size phase0 or filtered copy is ever held in memory
-        for start in range(0, phase.shape[1], _PHASE_CHUNK):
-            chunk = phase[:, start:start + _PHASE_CHUNK]
+            # Step 2: Extract cumulative temporal phase
+            phase = temporal_phase(chunk)
 
             # Step 3: Temporal filtering — separate base motion from detail
-            phase0 = flattop_filter_1d(chunk, width, axis=0, mode='reflect')
+            phase0 = flattop_filter_1d(phase, width, axis=0, mode='reflect')
 
             # Step 4: Amplify detail phase deviations by magnification factor
-            chunk -= phase0
-            chunk *= magnification
-            chunk += phase0
+            phase -= phase0
+            phase *= magnification
+            phase += phase0
+            del phase0
 
             # Step 5: Additional smoothing to remove high-frequency phase noise
-            chunk[:] = flattop_filter_1d(chunk, 2.0, axis=0, mode='reflect')
+            phase = flattop_filter_1d(phase, 2.0, axis=0, mode='reflect')
 
-        # Reconstruct coefficients: preserve amplitude, replace phase
-        # Process frame-by-frame to avoid materializing large intermediate arrays
-        shape = pyramids[0].highpasses[level].shape
-        for i in range(num_frames):
-            coeffs = pyramids[i].highpasses[level].flatten()
-            amp = np.abs(coeffs)
-            pyramids[i].highpasses[level][:] = (
-                amp * np.exp(1j * phase[i])
-            ).reshape(shape)
+            # Reconstruct coefficients: preserve amplitude, replace phase
+            chunk[:] = np.abs(chunk) * np.exp(1j * phase)
 
-    # Step 6: Inverse DTCWT
-    print("  Inverse DTCWT...")
-    result = np.empty(data.shape, dtype=np.float32)
-    t_start = time.time()
-    for i in range(num_frames):
-        # dtcwt pads odd sizes by one row/column; crop back to the input size
-        result[i, :, :] = transform.inverse(pyramids[i])[:data.shape[1], :data.shape[2]]
-        pyramids[i] = None  # free each pyramid once reconstructed
+        with ThreadPoolExecutor(jobs) as threads:
+            for level, hp in enumerate(state['highpasses']):
+                print(f"    Level {level + 1}/{nlevels}")
+                coeffs = hp.reshape(num_frames, -1)
+                list(threads.map(lambda start, c=coeffs: process(c, start),
+                                 range(0, coeffs.shape[1], _PHASE_CHUNK)))
 
-        if (i + 1) % max(1, num_frames // 10) == 0:
-            elapsed = time.time() - t_start
-            pct = (i + 1) / num_frames
-            eta = elapsed / pct * (1 - pct)
-            print(f"    {i + 1}/{num_frames} frames "
-                  f"({pct:.0%}) — {format_duration(eta)} remaining")
-
-    return result
+        # Step 6: Inverse DTCWT
+        print("  Inverse DTCWT...")
+        state['result'] = _shared_empty(data.shape, np.float32)
+        _run_frame_blocks(_inverse_block, num_frames, jobs, "inverse")
+        return state['result']
+    finally:
+        _POOL.pop('state', None)
 
 
 # Filter names available in both dtcwt (CPU) and pytorch_wavelets (GPU)
@@ -842,6 +925,10 @@ def main():
         help='Frame rate of the output (default: from the input video)'
     )
     parser.add_argument(
+        '--jobs', type=int, default=None,
+        help='CPU worker processes/threads (default: 2; 1 = serial)'
+    )
+    parser.add_argument(
         '--gpu', action='store_true',
         help='Use GPU acceleration (requires PyTorch + pytorch_wavelets)'
     )
@@ -875,6 +962,10 @@ def main():
 
     if args.nlevels < 1:
         print("Error: --nlevels must be at least 1", file=sys.stderr)
+        sys.exit(1)
+
+    if args.jobs is not None and args.jobs < 1:
+        print("Error: --jobs must be at least 1", file=sys.stderr)
         sys.exit(1)
 
     if args.fps is not None and not args.fps > 0:
@@ -938,7 +1029,8 @@ def main():
     print(f"  {frame_count} frames, {frame_size[0]}x{frame_size[1]}, {fps} fps")
 
     need, _ = estimate_memory(frame_count, frame_size[1], frame_size[0],
-                              args.nlevels, gpu=args.gpu)
+                              args.nlevels, gpu=args.gpu,
+                              jobs=_default_jobs(args.jobs))
     available = _available_memory()
     print(f"  Estimated peak RAM: {need / 1024**3:.1f} GiB")
     if available is not None and need > available:
@@ -948,7 +1040,8 @@ def main():
 
     # --- Parameters ---
     print("\nParameters:")
-    backend = "GPU (pytorch_wavelets, float32)" if args.gpu else "CPU (dtcwt)"
+    backend = ("GPU (pytorch_wavelets, float32)" if args.gpu
+               else f"CPU (dtcwt, {_default_jobs(args.jobs)} jobs)")
     print(f"  Backend:         {backend}")
     print(f"  Magnification:   {args.magnification}x")
     print(f"  Filter width:    {args.width}")
@@ -993,6 +1086,7 @@ def main():
                 nlevels=args.nlevels,
                 biort=args.biort,
                 qshift=args.qshift,
+                jobs=args.jobs,
             )
         # Keep only the uint8 result so finished channels cost 1 byte/pixel
         channels[idx] = np.clip(np.rint(result), 0, 255).astype(np.uint8)

@@ -329,6 +329,27 @@ class TestMagnifyMotions:
 # Bug fix: load_video buffer guard
 # ---------------------------------------------------------------------------
 
+class TestParallelJobs:
+    def test_result_does_not_depend_on_jobs(self):
+        """Frames and coefficient columns are independent, so worker count
+        must not change a single bit of the output."""
+        data = (np.random.RandomState(0).rand(12, 40, 36) * 255).astype(np.uint8)
+        kwargs = dict(magnification=3.0, width=5, nlevels=3)
+        serial = motion_mag.magnify_motions(data, jobs=1, **kwargs)
+        with patch.object(motion_mag, "_PHASE_CHUNK", 7):  # many chunks per level
+            parallel = motion_mag.magnify_motions(data, jobs=3, **kwargs)
+        np.testing.assert_array_equal(parallel, serial)
+
+    def test_default_jobs(self):
+        assert motion_mag._default_jobs(None) == min(motion_mag._DEFAULT_JOBS, os.cpu_count())
+        assert motion_mag._default_jobs(1) == 1
+
+    def test_estimate_grows_with_jobs(self):
+        one, _ = motion_mag.estimate_memory(100, 480, 640, 4, jobs=1)
+        four, _ = motion_mag.estimate_memory(100, 480, 640, 4, jobs=4)
+        assert four > one
+
+
 class TestMagnifyMotionsUint8:
     def test_uint8_input_matches_float_input(self):
         """load_video returns uint8 channels; results must match float input."""
@@ -496,7 +517,7 @@ class TestCliEndToEnd:
         out = str(tmp_path / "out.avi")
         result = run_cli_full("-i", tiny_video, "-o", out, "-w", "2", "--nlevels", "2")
         assert result.returncode == 0, result.stderr
-        assert "Backend:         CPU (dtcwt)" in result.stdout
+        assert "Backend:         CPU (dtcwt, " in result.stdout
         self._check_output(out)
 
     def test_filter_flags_are_used(self, tiny_video, tmp_path):
@@ -583,6 +604,11 @@ class TestInputValidation:
         code, stderr = run_cli("-i", dummy_video, "--biort", "near_sym_x")
         assert code == 2
         assert "invalid choice: 'near_sym_x'" in stderr
+
+    def test_jobs_zero(self, dummy_video):
+        code, stderr = run_cli("-i", dummy_video, "--jobs", "0")
+        assert code == 1
+        assert "--jobs must be at least 1" in stderr
 
     def test_nlevels_zero(self, dummy_video):
         code, stderr = run_cli("-i", dummy_video, "--nlevels", "0")
