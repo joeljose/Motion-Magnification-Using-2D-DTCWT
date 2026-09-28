@@ -358,6 +358,13 @@ class TestBandMode:
         expected = np.sin(2 * np.pi * mid_f * t)
         assert np.abs(y - expected)[100:500].max() < 0.05
 
+    def test_empty_band_raises(self):
+        x = np.random.RandomState(0).randn(301, 3)
+        with pytest.raises(ValueError, match="contains no frequency bins"):
+            motion_mag.bandpass_1d(x, 0.9 / 30, 0.9001 / 30)
+        assert motion_mag.band_bins(301, 0.9 / 30, 0.9001 / 30) == 0
+        assert motion_mag.band_bins(301, 0.8 / 30, 2.0 / 30) > 0
+
     def test_flattop_band_matches_documented_defaults(self):
         low, high = motion_mag.flattop_band(80)
         assert low * 30 == pytest.approx(0.20, abs=0.01)
@@ -615,7 +622,7 @@ class TestCliEndToEnd:
         result = run_cli_full("-i", tiny_video, "-o", out, "--nlevels", "2",
                               "--freq-low", "2", "--freq-high", "8")
         assert result.returncode == 0, result.stderr
-        assert "Band:            2–8 Hz (ideal band-pass)" in result.stdout
+        assert "Band:            2–8 Hz (ideal band-pass; " in result.stdout
         self._check_output(out)
 
     def test_default_band_is_printed(self, tiny_video, tmp_path):
@@ -723,6 +730,25 @@ class TestInputValidation:
         code, stderr = run_cli("-i", tiny_video, "--freq-low", "1", "--freq-high", "20")
         assert code == 1
         assert "above the Nyquist frequency (15 Hz at 30 fps)" in stderr
+
+    def test_empty_band_rejected_before_processing(self, tiny_video):
+        result = run_cli_full("-i", tiny_video, "--freq-low", "3", "--freq-high", "3.001")
+        assert result.returncode == 1
+        assert "contains no frequency bins" in result.stderr
+        assert "Parameters:" not in result.stdout
+        assert "Forward DTCWT" not in result.stdout
+
+    def test_nyquist_checked_before_parameters(self, tiny_video):
+        result = run_cli_full("-i", tiny_video, "--freq-low", "1", "--freq-high", "20")
+        assert result.returncode == 1
+        assert "Parameters:" not in result.stdout
+
+    def test_band_narrower_than_resolution_warns(self, tiny_video, tmp_path):
+        # 12 frames at 30 fps: resolution 2.5 Hz
+        result = run_cli_full("-i", tiny_video, "-o", str(tmp_path / "o.avi"), "--nlevels", "2",
+                              "--freq-low", "2", "--freq-high", "3")
+        assert result.returncode == 0, result.stderr
+        assert "narrower than the clip's frequency resolution (2.5 Hz" in result.stderr
 
     def test_width_is_deprecated(self, tiny_video, tmp_path):
         result = run_cli_full("-i", tiny_video, "-o", str(tmp_path / "o.avi"),

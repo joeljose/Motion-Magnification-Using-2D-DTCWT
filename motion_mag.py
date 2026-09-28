@@ -185,6 +185,26 @@ def _band_mask(n_fft, low, high):
     return (f >= low) & (f <= high)
 
 
+def band_bins(num_frames, low, high):
+    """FFT bins that bandpass_1d keeps for a clip of num_frames frames.
+
+    The filter's FFT runs on the clip extended to about 3x its length, so
+    these bins are ~3x finer than the clip's real frequency resolution
+    (1 / num_frames cycles per frame). 0 means the band would remove all
+    motion and leave the video unmagnified.
+    """
+    n_fft = sp_fft.next_fast_len(3 * num_frames, real=True)
+    return int(_band_mask(n_fft, low, high).sum())
+
+
+def _check_band(num_frames, low, high):
+    if band_bins(num_frames, low, high) == 0:
+        raise ValueError(
+            f"band {low:.4g}-{high:.4g} cycles/frame contains no frequency bins "
+            f"for {num_frames} frames (resolution {1 / num_frames:.4g} cycles/frame); "
+            f"widen the band or use a longer clip")
+
+
 def bandpass_1d(data, low, high):
     """Ideal temporal band-pass along axis 0.
 
@@ -199,8 +219,12 @@ def bandpass_1d(data, low, high):
 
     Returns:
         Array of the same shape and precision as `data`.
+
+    Raises:
+        ValueError: If the band contains no frequency bins (see band_bins).
     """
     n = data.shape[0]
+    _check_band(n, low, high)
     padded = np.pad(data, [(n, n)] + [(0, 0)] * (data.ndim - 1), mode='symmetric')
     n_fft = sp_fft.next_fast_len(padded.shape[0], real=True)
     spectrum = sp_fft.rfft(padded, n_fft, axis=0)
@@ -619,6 +643,7 @@ def _gpu_bandpass_filter(phase_arrays, magnification, band, device):
     import torch
 
     num_frames = phase_arrays[0].shape[0]
+    _check_band(num_frames, *band)
     n_fft = sp_fft.next_fast_len(3 * num_frames, real=True)
     mask = torch.from_numpy(_band_mask(n_fft, *band)).to(device).unsqueeze(1)
     chunk_size = max(64, int(_free_memory(device) * 0.5 / (n_fft * 40)))
@@ -1241,6 +1266,30 @@ def main():
               f"available memory ({available / 1024**3:.1f} GiB). Consider a "
               f"shorter or smaller clip, or fewer --nlevels.", file=sys.stderr)
 
+    # --- Band checks (before any output or processing) ---
+    if band_mode:
+        if args.freq_high > fps / 2:
+            print(f"Error: --freq-high {args.freq_high:g} Hz is above the Nyquist "
+                  f"frequency ({fps / 2:g} Hz at {fps:g} fps)", file=sys.stderr)
+            sys.exit(1)
+        band = (args.freq_low / fps, args.freq_high / fps)
+        resolution = fps / frame_count
+        bins = band_bins(frame_count, *band)
+        if bins == 0:
+            print(f"Error: the band {args.freq_low:g}–{args.freq_high:g} Hz contains no "
+                  f"frequency bins for {frame_count} frames at {fps:g} fps (resolution "
+                  f"{resolution:.3g} Hz), so nothing would be magnified. Widen the band "
+                  f"or use a longer clip.", file=sys.stderr)
+            sys.exit(1)
+        if args.freq_high - args.freq_low < resolution:
+            print(f"Warning: the band {args.freq_low:g}–{args.freq_high:g} Hz is "
+                  f"narrower than the clip's frequency resolution ({resolution:.3g} Hz "
+                  f"for {frame_count} frames); the result depends on where the band "
+                  f"falls between bins. Widen the band or use a longer clip.",
+                  file=sys.stderr)
+    else:
+        band = None
+
     # --- Parameters ---
     print("\nParameters:")
     backend = ("GPU (pytorch_wavelets, float32)" if args.gpu
@@ -1251,15 +1300,9 @@ def main():
         print(f"  Phase sigma:     {args.phase_sigma:g}")
     print(f"  Magnification:   {args.magnification}x")
     if band_mode:
-        if args.freq_high > fps / 2:
-            print(f"Error: --freq-high {args.freq_high:g} Hz is above the Nyquist "
-                  f"frequency ({fps / 2:g} Hz at {fps:g} fps)", file=sys.stderr)
-            sys.exit(1)
-        band = (args.freq_low / fps, args.freq_high / fps)
         print(f"  Band:            {args.freq_low:g}–{args.freq_high:g} Hz "
-              f"(ideal band-pass)")
+              f"(ideal band-pass; {bins} bins, resolution {fps / frame_count:.3g} Hz)")
     else:
-        band = None
         low, high = flattop_band(args.width)
         print(f"  Band:            ~{low * fps:.2f}–{high * fps:.2f} Hz "
               f"(flat-top, width {args.width:g})")

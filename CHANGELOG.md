@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Odd frame sizes crashed the CPU path at the inverse DTCWT (#30)
 - Unreadable input now exits 1 with a clear error; frames beyond an under-reported frame count are no longer dropped; a missing frame rate is an error unless the new `--fps` is given; clips shorter than 3 frames are rejected (#31)
 - Tests: weak assertions tightened; added a golden regression test (`tests/data/golden_face.npz`, regenerated with `scripts/make_golden.py`), a test that motion is magnified about k times, and CLI runs on a real clip (#32)
+- Band mode: a band containing no frequency bins silently left the video unmagnified; it is now rejected before processing (CPU, GPU and `bandpass_1d`), a band narrower than the clip's resolution warns, and the band's bin count and resolution are printed. The Nyquist check now runs before the Parameters output (#67)
 
 ### Changed
 - Reproducible builds: Docker images install from hash-locked `requirements.lock` / `requirements-gpu.lock`, `pytorch_wavelets` is pinned to a commit, base images and GitHub Actions are pinned by digest/SHA, and Dependabot watches them. `opencv-python-headless` is used everywhere. Images use a fixed non-root user, so `docker build .` needs no build args; run with `--user "$(id -u):$(id -g)"` for bind mounts (#33)
