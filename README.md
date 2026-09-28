@@ -150,7 +150,7 @@ Coefficients are reconstructed with the original amplitude and modified phase: $
 
 - **Higher k → more noise/artifacts** — amplification also amplifies phase noise, producing spatial artifacts at high magnification factors.
 - **Memory intensive** — all frame pyramids must remain in memory simultaneously for temporal filtering. Long videos or high resolutions may require significant RAM.
-- **Slow on CPU** — DTCWT is computed on every frame × 3 color channels. Processing time scales linearly with frame count. Use `--gpu` for ~5x speedup.
+- **Slow on CPU** — DTCWT is computed on every frame × 3 color channels. Processing time scales linearly with frame count. The CPU path uses 2 workers by default (`--jobs`); the dtcwt transforms are memory-bound, so more workers only help on machines with more memory bandwidth. Use `--gpu` for a larger speedup.
 - **Large motions violate assumptions** — the phase-to-motion relationship is linear only for small displacements. Large motions produce phase wrapping artifacts.
 
 ---
@@ -232,9 +232,9 @@ Benchmarked on face.mp4 (301 frames, 528x592, k=3, nlevels 8) with an RTX 4050 L
 | Metric | CPU | GPU |
 |---|---|---|
 | Per-channel speedup | — | ~5-17x |
-| End-to-end time | ~1 min 40 s | ~24 sec |
+| End-to-end time | ~56 s (`--jobs 2`, default; 88 s with `--jobs 1`) | ~24 sec |
 | Precision | float32 / complex64 | float32 |
-| Peak RAM | 2.9 GiB | 2.8 GiB |
+| Peak RAM | 2.3 GiB | 2.8 GiB |
 | Peak VRAM | — | ~2-3 GB |
 
 **Hardware requirements (GPU path):**
@@ -242,7 +242,7 @@ Benchmarked on face.mp4 (301 frames, 528x592, k=3, nlevels 8) with an RTX 4050 L
 - Minimum ~4 GB VRAM recommended (auto-tuning adapts batch/chunk sizes)
 - [`nvidia-container-toolkit`](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) for Docker GPU support
 
-**Memory check:** After loading the video, the tool prints its estimate of peak CPU RAM and warns if it exceeds the available memory (read from `/proc/meminfo` on Linux). CPU peak RAM grows linearly with frame count × resolution: roughly 33 bytes per pixel per frame (about 2.9 GiB for face.mp4).
+**Memory check:** After loading the video, the tool prints its estimate of peak CPU RAM and warns if it exceeds the available memory (read from `/proc/meminfo` on Linux). CPU peak RAM grows linearly with frame count × resolution: roughly 26 bytes per pixel per frame (about 2.3 GiB for face.mp4), plus about 130 MiB per extra `--jobs` worker.
 
 **Note:** CPU and GPU paths use different DTCWT implementations (`dtcwt` vs `pytorch_wavelets`) with the same filters. A test checks they agree on a moving clip (PSNR >= 60 dB; measured about 115 dB), so outputs differ only at the float32 precision level.
 
@@ -332,6 +332,7 @@ python motion_mag.py -i face.mp4 --gpu -k 5 --biort near_sym_a --qshift qshift_a
 | `-w / --width` | 80 | Temporal filter width (frames) |
 | `--nlevels` | 8 | DTCWT decomposition levels |
 | `--fps` | from input | Output frame rate; required when the input doesn't report one |
+| `--jobs` | 2 | CPU worker processes/threads (1 = serial). Output does not depend on it |
 | `--gpu` | off | Enable GPU acceleration (requires PyTorch + pytorch_wavelets) |
 | `--device` | 0 | CUDA device index (for multi-GPU systems) |
 | `--biort` | `near_sym_b` | Biorthogonal wavelet filter for DTCWT level 1 |
