@@ -1,21 +1,23 @@
-"""GPU unit tests for motion_mag.py — requires CUDA GPU + pytorch_wavelets."""
+"""Tests for the GPU code path of motion_mag.py.
+
+They need torch + pytorch_wavelets and run on CUDA when available, otherwise
+on CPU tensors (CI installs the CPU build of PyTorch for this).
+"""
 
 import os
 import sys
+from unittest import mock
 
 import numpy as np
 import pytest
 
-try:
-    import torch
-    HAS_CUDA = torch.cuda.is_available()
-except ImportError:
-    HAS_CUDA = False
-
-pytestmark = pytest.mark.skipif(not HAS_CUDA, reason="No CUDA GPU available")
+torch = pytest.importorskip("torch")
+pytorch_wavelets = pytest.importorskip("pytorch_wavelets")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import motion_mag  # noqa: E402
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ---------------------------------------------------------------------------
 # Tier 2: GPU forward pass
@@ -29,7 +31,7 @@ class TestGpuForwardPass:
         rng = np.random.RandomState(42)
         data = rng.rand(10, 32, 32).astype(np.float32)
         nlevels = 3
-        device = torch.device('cuda')
+        device = DEVICE
 
         phases = motion_mag._gpu_forward_pass(
             data, nlevels=nlevels, biort='near_sym_b', qshift='qshift_b',
@@ -41,7 +43,7 @@ class TestGpuForwardPass:
         """Each phase array should have num_frames rows."""
         rng = np.random.RandomState(42)
         data = rng.rand(10, 32, 32).astype(np.float32)
-        device = torch.device('cuda')
+        device = DEVICE
 
         phases = motion_mag._gpu_forward_pass(
             data, nlevels=3, biort='near_sym_b', qshift='qshift_b',
@@ -54,7 +56,7 @@ class TestGpuForwardPass:
         """Phase arrays should contain no NaN or Inf."""
         rng = np.random.RandomState(42)
         data = rng.rand(10, 32, 32).astype(np.float32)
-        device = torch.device('cuda')
+        device = DEVICE
 
         phases = motion_mag._gpu_forward_pass(
             data, nlevels=3, biort='near_sym_b', qshift='qshift_b',
@@ -67,7 +69,7 @@ class TestGpuForwardPass:
         """Processing in small batches should match processing all at once."""
         rng = np.random.RandomState(42)
         data = rng.rand(10, 32, 32).astype(np.float32)
-        device = torch.device('cuda')
+        device = DEVICE
 
         # Single batch (all 10 frames)
         phases_single = motion_mag._gpu_forward_pass(
@@ -75,13 +77,9 @@ class TestGpuForwardPass:
             device=device,
         )
 
-        # Force small batches by temporarily patching VRAM query
-        # Use a wrapper that forces batch_size=3
-        import unittest.mock
-        # Return tiny free VRAM to force batch_size=3
-        small_vram = data.shape[1] * data.shape[2] * 4 * 15 * 3  # 3 frames worth
-        with unittest.mock.patch('torch.cuda.mem_get_info',
-                                 return_value=(small_vram, small_vram)):
+        # Force small batches by reporting little free memory (batch size 2)
+        small_vram = data.shape[1] * data.shape[2] * 4 * 15 * 3
+        with mock.patch.object(motion_mag, '_free_memory', return_value=small_vram):
             phases_batched = motion_mag._gpu_forward_pass(
                 data, nlevels=3, biort='near_sym_b', qshift='qshift_b',
                 device=device,
@@ -103,7 +101,7 @@ class TestGpuTemporalFilter:
             np.random.randn(20, 1000).astype(np.float32),
             np.random.randn(20, 250).astype(np.float32),
         ]
-        device = torch.device('cuda')
+        device = DEVICE
         motion_mag._gpu_temporal_filter(phases, magnification=3.0, width=5.0,
                                         device=device)
         assert phases[0].shape == (20, 1000)
@@ -112,7 +110,7 @@ class TestGpuTemporalFilter:
     def test_output_values_finite(self):
         """Filtered phases should contain no NaN or Inf."""
         phases = [np.random.randn(20, 500).astype(np.float32)]
-        device = torch.device('cuda')
+        device = DEVICE
         motion_mag._gpu_temporal_filter(phases, magnification=3.0, width=5.0,
                                         device=device)
         assert np.all(np.isfinite(phases[0]))
@@ -124,7 +122,7 @@ class TestGpuTemporalFilter:
         Interior frames should still be close to the original DC value.
         """
         phases = [np.ones((50, 100), dtype=np.float32) * 2.5]
-        device = torch.device('cuda')
+        device = DEVICE
         motion_mag._gpu_temporal_filter(phases, magnification=3.0, width=5.0,
                                         device=device)
         # Check interior frames (skip boundary region)
@@ -138,7 +136,7 @@ class TestGpuInversePass:
     def test_output_shape_matches_input(self):
         rng = np.random.RandomState(42)
         data = rng.rand(10, 32, 32).astype(np.float32)
-        device = torch.device('cuda')
+        device = DEVICE
         nlevels = 3
 
         # Extract phases, then reconstruct without modification (identity test)
@@ -155,7 +153,7 @@ class TestGpuInversePass:
     def test_output_values_finite(self):
         rng = np.random.RandomState(42)
         data = rng.rand(5, 16, 16).astype(np.float32)
-        device = torch.device('cuda')
+        device = DEVICE
         nlevels = 2
 
         phases = motion_mag._gpu_forward_pass(
@@ -172,7 +170,7 @@ class TestGpuInversePass:
         """Forward → extract phases → reconstruct with same phases → close to input."""
         rng = np.random.RandomState(42)
         data = rng.rand(5, 32, 32).astype(np.float32)
-        device = torch.device('cuda')
+        device = DEVICE
         nlevels = 3
 
         phases = motion_mag._gpu_forward_pass(
@@ -195,7 +193,7 @@ class TestMagnifyMotionsGpu:
     def test_output_shape_and_dtype(self):
         rng = np.random.RandomState(42)
         data = rng.rand(10, 32, 32).astype(np.float32)
-        device = torch.device('cuda')
+        device = DEVICE
         result = motion_mag.magnify_motions_gpu(
             data, magnification=2.0, width=3, nlevels=2,
             biort='near_sym_b', qshift='qshift_b', device=device,
@@ -206,7 +204,7 @@ class TestMagnifyMotionsGpu:
     def test_output_values_finite(self):
         rng = np.random.RandomState(42)
         data = rng.rand(5, 16, 16).astype(np.float32)
-        device = torch.device('cuda')
+        device = DEVICE
         result = motion_mag.magnify_motions_gpu(
             data, magnification=2.0, width=3, nlevels=2,
             biort='near_sym_b', qshift='qshift_b', device=device,
@@ -218,7 +216,7 @@ class TestMagnifyMotionsGpu:
         rng = np.random.RandomState(42)
         # Use 0-255 range like real video frames
         data = (rng.rand(10, 32, 32) * 255).astype(np.float32)
-        device = torch.device('cuda')
+        device = DEVICE
         result = motion_mag.magnify_motions_gpu(
             data, magnification=3.0, width=3, nlevels=2,
             biort='near_sym_b', qshift='qshift_b', device=device,
@@ -231,7 +229,7 @@ class TestMagnifyMotionsGpu:
     def test_odd_frame_size(self, shape):
         data = (np.random.RandomState(0).rand(*shape) * 255).astype(np.float32)
         result = motion_mag.magnify_motions_gpu(
-            data, magnification=3.0, width=3, nlevels=2, device=torch.device('cuda'),
+            data, magnification=3.0, width=3, nlevels=2, device=DEVICE,
         )
         assert result.shape == data.shape
         assert np.isfinite(result).all()
@@ -244,7 +242,7 @@ class TestGpuForwardPassDtype:
         """Phase arrays should be float32 (matching GPU precision)."""
         rng = np.random.RandomState(42)
         data = rng.rand(10, 32, 32).astype(np.float32)
-        device = torch.device('cuda')
+        device = DEVICE
 
         phases = motion_mag._gpu_forward_pass(
             data, nlevels=3, biort='near_sym_b', qshift='qshift_b',
@@ -252,3 +250,67 @@ class TestGpuForwardPassDtype:
         )
         for phase in phases:
             assert phase.dtype == np.float32
+
+
+# ---------------------------------------------------------------------------
+# Out-of-memory handling
+# ---------------------------------------------------------------------------
+
+def _oom_above(limit):
+    """A DTCWTForward that raises CUDA OOM for batches larger than `limit`."""
+    class LimitedForward(pytorch_wavelets.DTCWTForward):
+        def forward(self, x):
+            if x.shape[0] > limit:
+                raise torch.cuda.OutOfMemoryError("simulated")
+            return super().forward(x)
+    return LimitedForward
+
+
+class TestOutOfMemoryRetry:
+    def test_pipeline_completes_with_smaller_batches(self, capsys):
+        data = (np.random.RandomState(0).rand(12, 32, 32) * 255).astype(np.float32)
+        kwargs = dict(magnification=3.0, width=3, nlevels=2, device=DEVICE)
+        expected = motion_mag.magnify_motions_gpu(data, **kwargs)
+        with mock.patch.object(pytorch_wavelets, "DTCWTForward", _oom_above(3)):
+            result = motion_mag.magnify_motions_gpu(data, **kwargs)
+        assert "Out of GPU memory; retrying with batch size" in capsys.readouterr().out
+        np.testing.assert_allclose(result, expected, atol=1e-3)
+
+    def test_single_frame_oom_is_raised(self):
+        data = np.random.RandomState(0).rand(4, 16, 16).astype(np.float32)
+        with mock.patch.object(pytorch_wavelets, "DTCWTForward", _oom_above(0)):
+            with pytest.raises(torch.cuda.OutOfMemoryError):
+                motion_mag.magnify_motions_gpu(data, width=3, nlevels=2, device=DEVICE)
+
+    def test_run_batches_halves_until_it_fits(self):
+        calls = []
+
+        def process(start, end):
+            calls.append((start, end))
+            if end - start > 3:
+                raise torch.cuda.OutOfMemoryError("simulated")
+
+        motion_mag._run_batches(10, 10, process, "chunk")
+        done = [c for c in calls if c[1] - c[0] <= 3]
+        assert sorted(done) == [(0, 2), (2, 4), (4, 6), (6, 8), (8, 10)]
+
+
+# ---------------------------------------------------------------------------
+# Agreement with the CPU path
+# ---------------------------------------------------------------------------
+
+def test_gpu_path_agrees_with_cpu_path():
+    """Both paths implement the same algorithm with the same filters, so on a
+    moving textured clip they should agree closely. Measured ~115 dB PSNR on
+    CUDA and on CPU tensors; float32 vs float64 sets the limit."""
+    from scipy import ndimage
+    base = ndimage.gaussian_filter(np.random.RandomState(0).rand(64, 64), 1.5) * 255
+    spectrum = np.fft.fft2(base)
+    shifts = 0.3 * np.sin(2 * np.pi * np.arange(24) / 8)
+    data = np.stack([np.real(np.fft.ifft2(ndimage.fourier_shift(spectrum, (0, s))))
+                     for s in shifts]).astype(np.float32)
+    kwargs = dict(magnification=3.0, width=5, nlevels=3)
+    cpu = motion_mag.magnify_motions(data, **kwargs)
+    gpu = motion_mag.magnify_motions_gpu(data, device=DEVICE, **kwargs)
+    mse = np.mean((cpu.astype(np.float64) - gpu) ** 2)
+    assert 10 * np.log10(255 ** 2 / mse) >= 60

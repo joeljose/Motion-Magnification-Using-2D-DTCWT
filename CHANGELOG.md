@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 - Reproducible builds: Docker images install from hash-locked `requirements.lock` / `requirements-gpu.lock`, `pytorch_wavelets` is pinned to a commit, base images and GitHub Actions are pinned by digest/SHA, and Dependabot watches them. `opencv-python-headless` is used everywhere. Images use a fixed non-root user, so `docker build .` needs no build args; run with `--user "$(id -u):$(id -g)"` for bind mounts (#33)
+- GPU path: batches and FFT chunks that run out of GPU memory are retried at half the size; an invalid `--device` gives a clean error; the GPU code runs on CPU tensors too, and CI runs its tests with CPU PyTorch (#34)
 
 ## [2.0.0] - 2026-03-21
 

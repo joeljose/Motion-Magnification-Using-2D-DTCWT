@@ -348,6 +348,37 @@ def save_video(channels, fps, path, frame_size):
     print(f"Output saved to {path}")
 
 
+def _free_memory(device):
+    """Free bytes on a torch device: VRAM for CUDA, RAM for CPU."""
+    import torch
+    if device.type == 'cuda':
+        return torch.cuda.mem_get_info(device.index or 0)[0]
+    available = _available_memory()
+    return available if available is not None else 4 * 1024**3
+
+
+def _run_batches(total, batch_size, process, what):
+    """Call process(start, end) over [0, total) in batches.
+
+    On a CUDA out-of-memory error the batch is retried at half the size,
+    down to 1; only a failure at size 1 is raised.
+    """
+    import torch
+    start = 0
+    while start < total:
+        end = min(start + batch_size, total)
+        try:
+            process(start, end)
+        except torch.cuda.OutOfMemoryError:
+            if end - start == 1:
+                raise
+            batch_size = max(1, (end - start) // 2)
+            torch.cuda.empty_cache()
+            print(f"    Out of GPU memory; retrying with {what} size {batch_size}")
+            continue
+        start = end
+
+
 def _gpu_forward_pass(data, nlevels, biort, qshift, device):
     """GPU Pass 1: Batched forward DTCWT + phase extraction.
 
@@ -360,7 +391,7 @@ def _gpu_forward_pass(data, nlevels, biort, qshift, device):
         nlevels: Number of DTCWT decomposition levels.
         biort: Biorthogonal filter name.
         qshift: Quarter-shift filter name.
-        device: torch.device for GPU.
+        device: torch.device (CUDA, or CPU for testing).
 
     Returns:
         List of nlevels numpy arrays, each (num_frames, num_coeffs) float32,
@@ -372,24 +403,16 @@ def _gpu_forward_pass(data, nlevels, biort, qshift, device):
     xfm = DTCWTForward(J=nlevels, biort=biort, qshift=qshift).to(device)
     num_frames = data.shape[0]
 
-    # Determine batch size from available VRAM (70% of free)
-    device_idx = device.index if device.index is not None else 0
-    free_vram = torch.cuda.mem_get_info(device_idx)[0]
+    # Batch size from free memory (70%); OOM retries shrink it further
     frame_bytes = data.shape[1] * data.shape[2] * 4 * 15  # ~15x for DTCWT overhead
-    batch_size = max(1, int(free_vram * 0.7 / frame_bytes))
-    batch_size = min(batch_size, num_frames)
+    batch_size = max(1, min(num_frames, int(_free_memory(device) * 0.7 / frame_bytes)))
 
-    # Get level shapes from a single-frame forward pass
+    # Coefficient counts per level from a single-frame forward pass
     with torch.no_grad():
         test_frame = torch.from_numpy(data[0:1, np.newaxis, :, :]).to(device)
         _, Yh_test = xfm(test_frame)
-        level_shapes = []
-        level_coeffs = []
-        for level in range(nlevels):
-            shape = Yh_test[level].shape[2:]  # (6, H_l, W_l, 2)
-            nc = int(np.prod(shape[:-1]))  # 6 * H_l * W_l
-            level_shapes.append(shape)
-            level_coeffs.append(nc)
+        level_coeffs = [int(np.prod(Yh_test[level].shape[2:-1]))  # 6 * H_l * W_l
+                        for level in range(nlevels)]
         del test_frame, Yh_test
         torch.cuda.empty_cache()
 
@@ -397,17 +420,15 @@ def _gpu_forward_pass(data, nlevels, biort, qshift, device):
     delta_arrays = [np.empty((num_frames, nc), dtype=np.float32)
                     for nc in level_coeffs]
 
-    # Track previous frame's normalized coefficients for cross-batch boundary
-    prev_n_real = [None] * nlevels
-    prev_n_imag = [None] * nlevels
+    # Previous frame's normalized coefficients, for the cross-batch boundary
+    prev = [None] * nlevels
 
-    for start in range(0, num_frames, batch_size):
-        end = min(start + batch_size, num_frames)
+    def process(start, end):
         batch = torch.from_numpy(data[start:end, np.newaxis, :, :]).to(device)
-
         with torch.no_grad():
             _, Yh = xfm(batch)
 
+        last = [None] * nlevels
         for level in range(nlevels):
             hp = Yh[level]  # (B, 1, 6, H, W, 2)
             c_real = hp[..., 0]  # (B, 1, 6, H, W)
@@ -419,49 +440,125 @@ def _gpu_forward_pass(data, nlevels, biort, qshift, device):
             n_real = c_real / mag
             n_imag = c_imag / mag
 
-            # Frame 0 (global): absolute phase
             if start == 0:
+                # Frame 0 (global): absolute phase
                 phase0 = torch.atan2(n_imag[0:1], n_real[0:1])
                 delta_arrays[level][0] = phase0.reshape(1, -1).cpu().numpy()
-                intra_start = 1
             else:
                 # Cross-batch boundary: first frame vs prev batch's last frame
-                pr = prev_n_real[level]
-                pi = prev_n_imag[level]
+                pr, pi = prev[level]
                 boundary_real = n_real[0:1] * pr + n_imag[0:1] * pi
                 boundary_imag = n_imag[0:1] * pr - n_real[0:1] * pi
                 delta_arrays[level][start] = (
                     torch.atan2(boundary_imag, boundary_real)
                     .reshape(1, -1).cpu().numpy()
                 )
-                intra_start = 1
 
             # Intra-batch deltas (vectorized)
-            if end - start > intra_start:
-                idx = intra_start
-                pr = n_real[idx:] * n_real[idx - 1:-1] + n_imag[idx:] * n_imag[idx - 1:-1]
-                pi = n_imag[idx:] * n_real[idx - 1:-1] - n_real[idx:] * n_imag[idx - 1:-1]
+            if end - start > 1:
+                pr = n_real[1:] * n_real[:-1] + n_imag[1:] * n_imag[:-1]
+                pi = n_imag[1:] * n_real[:-1] - n_real[1:] * n_imag[:-1]
                 deltas = torch.atan2(pi, pr)
-                delta_arrays[level][start + idx:end] = (
-                    deltas.reshape(end - start - idx, -1).cpu().numpy()
+                delta_arrays[level][start + 1:end] = (
+                    deltas.reshape(end - start - 1, -1).cpu().numpy()
                 )
 
-            # Save last frame for next batch boundary
-            prev_n_real[level] = n_real[-1:].clone()
-            prev_n_imag[level] = n_imag[-1:].clone()
+            last[level] = (n_real[-1:].clone(), n_imag[-1:].clone())
 
+        # Commit the boundary state only once the whole batch succeeded, so
+        # an OOM retry of this batch starts from the right previous frame
+        prev[:] = last
         del batch, Yh
         torch.cuda.empty_cache()
 
+    _run_batches(num_frames, batch_size, process, "batch")
+
     # Cumulative sum on CPU to get absolute phase
-    phase_arrays = []
     for level in range(nlevels):
         np.cumsum(delta_arrays[level], axis=0, out=delta_arrays[level])
-        phase_arrays.append(delta_arrays[level])
 
-    del xfm, prev_n_real, prev_n_imag
     torch.cuda.empty_cache()
-    return phase_arrays
+    return delta_arrays
+
+
+def _gpu_temporal_filter(phase_arrays, magnification, width, device):
+    """GPU temporal filtering via chunked cuFFT.
+
+    Applies flat-top window filtering and phase modification in-place.
+    Chunks along the coefficient dimension to fit in VRAM.
+
+    Args:
+        phase_arrays: List of numpy arrays (num_frames, num_coeffs), float32.
+            Modified in-place.
+        magnification: Amplification factor for phase detail.
+        width: Temporal filter width in frames.
+        device: torch.device (CUDA, or CPU for testing).
+    """
+    import torch
+
+    large_window = _flattop_window(width)
+    small_window = _flattop_window(2.0)
+    num_frames = phase_arrays[0].shape[0]
+
+    # Padding size matches the larger window's half-width
+    pad_size = len(large_window) // 2
+    padded_frames = num_frames + 2 * pad_size
+
+    # Pre-compute FFT of windows for the padded length
+    large_fft_n = int(2 ** np.ceil(np.log2(padded_frames + len(large_window) - 1)))
+    small_fft_n = int(2 ** np.ceil(np.log2(padded_frames + len(small_window) - 1)))
+
+    # Center windows at index 0 for zero-phase filtering via circular shift
+    def _center_window_fft(window_np, fft_n, dev):
+        win_t = torch.from_numpy(window_np.astype(np.float32)).to(dev)
+        padded = torch.zeros(fft_n, device=dev)
+        half = len(window_np) // 2
+        padded[:len(window_np) - half] = win_t[half:]
+        if half > 0:
+            padded[-half:] = win_t[:half]
+        return torch.fft.rfft(padded)
+
+    large_win_fft = _center_window_fft(large_window, large_fft_n, device)
+    small_win_fft = _center_window_fft(small_window, small_fft_n, device)
+
+    # Chunk size from free memory (50%): each coefficient needs about
+    # padded_frames * 80 bytes (FFT overhead ~20x float32)
+    bytes_per_coeff = padded_frames * 80
+    chunk_size = max(64, int(_free_memory(device) * 0.5 / bytes_per_coeff))
+
+    for phase in phase_arrays:
+        def process(start, end):
+            # Pad along time on CPU before transfer, with the same boundary
+            # rule as the CPU path (ndimage 'reflect')
+            chunk_padded = np.pad(phase[:, start:end], [(pad_size, pad_size), (0, 0)],
+                                  mode='symmetric')
+            chunk = torch.from_numpy(chunk_padded).to(device)
+            del chunk_padded
+
+            # Large window filter → phase0 (base motion)
+            data_fft = torch.fft.rfft(chunk, n=large_fft_n, dim=0)
+            phase0 = torch.fft.irfft(
+                data_fft * large_win_fft.unsqueeze(1), n=large_fft_n, dim=0
+            )[:padded_frames]
+            del data_fft
+
+            # Amplify detail
+            chunk = phase0 + (chunk - phase0) * magnification
+            del phase0
+
+            # Small window smoothing
+            data_fft2 = torch.fft.rfft(chunk, n=small_fft_n, dim=0)
+            chunk = torch.fft.irfft(
+                data_fft2 * small_win_fft.unsqueeze(1), n=small_fft_n, dim=0
+            )[:padded_frames]
+            del data_fft2
+
+            # Trim padding, write back
+            phase[:, start:end] = chunk[pad_size:pad_size + num_frames].cpu().numpy()
+            del chunk
+            torch.cuda.empty_cache()
+
+        _run_batches(phase.shape[1], chunk_size, process, "chunk")
 
 
 def _gpu_inverse_pass(data, phase_arrays, nlevels, biort, qshift, device):
@@ -476,7 +573,7 @@ def _gpu_inverse_pass(data, phase_arrays, nlevels, biort, qshift, device):
         nlevels: Number of DTCWT decomposition levels.
         biort: Biorthogonal filter name.
         qshift: Quarter-shift filter name.
-        device: torch.device for GPU.
+        device: torch.device (CUDA, or CPU for testing).
 
     Returns:
         Reconstructed frames (num_frames, H, W), float32.
@@ -497,17 +594,13 @@ def _gpu_inverse_pass(data, phase_arrays, nlevels, biort, qshift, device):
         del test_frame, Yh_test
         torch.cuda.empty_cache()
 
-    # Auto-tune batch size
-    device_idx = device.index if device.index is not None else 0
-    free_vram = torch.cuda.mem_get_info(device_idx)[0]
+    # Batch size from free memory (70%); OOM retries shrink it further
     frame_bytes = h * w * 4 * 20  # ~20x overhead for fwd + inv
-    batch_size = max(1, int(free_vram * 0.7 / frame_bytes))
-    batch_size = min(batch_size, num_frames)
+    batch_size = max(1, min(num_frames, int(_free_memory(device) * 0.7 / frame_bytes)))
 
     result = np.empty_like(data)
 
-    for start in range(0, num_frames, batch_size):
-        end = min(start + batch_size, num_frames)
+    def process(start, end):
         batch = torch.from_numpy(data[start:end, np.newaxis, :, :]).to(device)
 
         with torch.no_grad():
@@ -517,11 +610,8 @@ def _gpu_inverse_pass(data, phase_arrays, nlevels, biort, qshift, device):
             Yh_mod = []
             for level in range(nlevels):
                 hp = Yh[level]  # (B, 1, 6, H_l, W_l, 2)
-                c_real = hp[..., 0]
-                c_imag = hp[..., 1]
-                amp = torch.sqrt(c_real ** 2 + c_imag ** 2)
+                amp = torch.sqrt(hp[..., 0] ** 2 + hp[..., 1] ** 2)
 
-                # Load modified phase, reshape to match coefficient layout
                 # phase_arrays[level] is (num_frames, 6*H*W) flattened from (B, 1, 6, H, W)
                 coeff_shape = level_shapes[level][:-1]  # (6, H_l, W_l)
                 mod_phase = torch.from_numpy(
@@ -539,7 +629,8 @@ def _gpu_inverse_pass(data, phase_arrays, nlevels, biort, qshift, device):
         del batch, Yl, Yh, Yh_mod, recon
         torch.cuda.empty_cache()
 
-    del xfm, ifm
+    _run_batches(num_frames, batch_size, process, "batch")
+
     torch.cuda.empty_cache()
     return result
 
@@ -553,6 +644,10 @@ def magnify_motions_gpu(data, magnification=3.0, width=80, nlevels=8,
     2. Temporal filtering (chunked cuFFT on GPU)
     3. Coefficient reconstruction + inverse DTCWT (batched on GPU)
 
+    Batches and chunks that run out of GPU memory are retried at half the
+    size; torch.cuda.OutOfMemoryError is raised only if a single frame or
+    coefficient chunk does not fit.
+
     Args:
         data: 3D numpy array (num_frames, height, width), float32.
         magnification: Amplification factor for phase deviations.
@@ -560,7 +655,7 @@ def magnify_motions_gpu(data, magnification=3.0, width=80, nlevels=8,
         nlevels: Number of DTCWT decomposition levels.
         biort: Biorthogonal filter name.
         qshift: Quarter-shift filter name.
-        device: torch.device for GPU.
+        device: torch.device (default CUDA; CPU works too, for testing).
 
     Returns:
         3D numpy array of same shape as input with magnified motions, float32.
@@ -588,92 +683,6 @@ def magnify_motions_gpu(data, magnification=3.0, width=80, nlevels=8,
     print(f"    Done in {format_duration(time.time() - t0)}")
 
     return result
-
-
-def _gpu_temporal_filter(phase_arrays, magnification, width, device):
-    """GPU temporal filtering via chunked cuFFT.
-
-    Applies flat-top window filtering and phase modification in-place.
-    Chunks along the coefficient dimension to fit in VRAM.
-
-    Args:
-        phase_arrays: List of numpy arrays (num_frames, num_coeffs), float32.
-            Modified in-place.
-        magnification: Amplification factor for phase detail.
-        width: Temporal filter width in frames.
-        device: torch.device for GPU.
-    """
-    import torch
-
-    large_window = _flattop_window(width)
-    small_window = _flattop_window(2.0)
-    num_frames = phase_arrays[0].shape[0]
-
-    # Reflect-pad size matches the larger window's half-width
-    pad_size = len(large_window) // 2
-    padded_frames = num_frames + 2 * pad_size
-
-    # Pre-compute FFT of windows for the padded length
-    large_fft_n = int(2 ** np.ceil(np.log2(padded_frames + len(large_window) - 1)))
-    small_fft_n = int(2 ** np.ceil(np.log2(padded_frames + len(small_window) - 1)))
-
-    # Center windows at index 0 for zero-phase filtering via circular shift
-    def _center_window_fft(window_np, fft_n, dev):
-        win_t = torch.from_numpy(window_np.astype(np.float32)).to(dev)
-        padded = torch.zeros(fft_n, device=dev)
-        half = len(window_np) // 2
-        padded[:len(window_np) - half] = win_t[half:]
-        if half > 0:
-            padded[-half:] = win_t[:half]
-        return torch.fft.rfft(padded)
-
-    large_win_fft = _center_window_fft(large_window, large_fft_n, device)
-    small_win_fft = _center_window_fft(small_window, small_fft_n, device)
-
-    # Auto-tune chunk size from available VRAM
-    device_idx = device.index if device.index is not None else 0
-    free_vram = torch.cuda.mem_get_info(device_idx)[0]
-    # Each coefficient needs: padded_frames * 80 bytes (FFT overhead ~20x float32)
-    bytes_per_coeff = padded_frames * 80
-    chunk_size = max(1000, int(free_vram * 0.5 / max(bytes_per_coeff, 1)))
-
-    for level in range(len(phase_arrays)):
-        phase = phase_arrays[level]
-        num_coeffs = phase.shape[1]
-
-        for start in range(0, num_coeffs, chunk_size):
-            end = min(start + chunk_size, num_coeffs)
-
-            # Pad along time on CPU before GPU transfer, with the same
-            # boundary rule as the CPU path (ndimage 'reflect')
-            chunk_np = phase[:, start:end]
-            chunk_padded = np.pad(chunk_np, [(pad_size, pad_size), (0, 0)],
-                                  mode='symmetric')
-            chunk = torch.from_numpy(chunk_padded).to(device)
-            del chunk_padded
-
-            # Large window filter → phase0 (base motion)
-            data_fft = torch.fft.rfft(chunk, n=large_fft_n, dim=0)
-            phase0 = torch.fft.irfft(
-                data_fft * large_win_fft.unsqueeze(1), n=large_fft_n, dim=0
-            )[:padded_frames]
-            del data_fft
-
-            # Amplify detail
-            chunk = phase0 + (chunk - phase0) * magnification
-            del phase0
-
-            # Small window smoothing
-            data_fft2 = torch.fft.rfft(chunk, n=small_fft_n, dim=0)
-            chunk = torch.fft.irfft(
-                data_fft2 * small_win_fft.unsqueeze(1), n=small_fft_n, dim=0
-            )[:padded_frames]
-            del data_fft2
-
-            # Trim padding, write back
-            phase[:, start:end] = chunk[pad_size:pad_size + num_frames].cpu().numpy()
-            del chunk
-            torch.cuda.empty_cache()
 
 
 # Coefficient columns filtered at a time in magnify_motions
@@ -883,6 +892,11 @@ def main():
             print("Error: --gpu requires CUDA but no GPU is available.",
                   file=sys.stderr)
             sys.exit(1)
+        if not 0 <= args.device < torch.cuda.device_count():
+            print(f"Error: --device {args.device} is not a valid CUDA device "
+                  f"(found {torch.cuda.device_count()}: 0 to "
+                  f"{torch.cuda.device_count() - 1}).", file=sys.stderr)
+            sys.exit(1)
 
     # --- Default output path ---
     if args.output is None:
@@ -948,15 +962,21 @@ def main():
         print(f"Processing {name} channel...")
         t0 = time.time()
         if args.gpu:
-            result = magnify_motions_gpu(
-                channels[idx].astype(np.float32),
-                magnification=args.magnification,
-                width=args.width,
-                nlevels=args.nlevels,
-                biort=args.biort,
-                qshift=args.qshift,
-                device=device,
-            )
+            try:
+                result = magnify_motions_gpu(
+                    channels[idx].astype(np.float32),
+                    magnification=args.magnification,
+                    width=args.width,
+                    nlevels=args.nlevels,
+                    biort=args.biort,
+                    qshift=args.qshift,
+                    device=device,
+                )
+            except torch.cuda.OutOfMemoryError:
+                print("Error: out of GPU memory even with single-frame batches. "
+                      "Try fewer --nlevels, a smaller or shorter clip, or the "
+                      "CPU path (omit --gpu).", file=sys.stderr)
+                sys.exit(1)
         else:
             result = magnify_motions(
                 channels[idx],

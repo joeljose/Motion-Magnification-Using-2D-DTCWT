@@ -399,13 +399,14 @@ All tests run inside Docker — no local Python dependencies needed:
 - Batched vs single-batch consistency (cross-batch boundary verification)
 - cuFFT temporal filter (shape preservation, DC signal handling)
 - Full GPU pipeline smoke test (finite output, correct dimensions, odd frame sizes)
-- All GPU tests skip automatically on systems without CUDA
+- Out-of-memory retry with smaller batches (simulated OOM), and agreement with the CPU path (PSNR >= 60 dB)
+- They run on CUDA when available and otherwise on CPU tensors; CI runs them with the CPU build of PyTorch. They skip only when torch or pytorch_wavelets is not installed
 
 **Dev workflow:**
 1. Make your changes
 2. Run `./test.sh` (and `./test.sh gpu` if touching GPU code)
 3. If all tests pass, commit and open a PR
-4. CI runs lint, the unit tests and a full run on face.mp4 automatically
+4. CI runs lint, the unit tests, a full run on face.mp4, and the GPU-path tests on CPU PyTorch automatically
 
 ### Versioning
 
