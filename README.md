@@ -317,6 +317,7 @@ The GPU Docker image is based on `pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime`
 python motion_mag.py -i face.mp4
 python motion_mag.py -i face.mp4 -o magnified.avi -k 5
 python motion_mag.py -i face.mp4 -k 3 -w 80 --nlevels 6
+python motion_mag.py -i face.mp4 -k 5 --color-space yiq   # luma only: ~3x faster, no colour fringing
 
 # GPU
 python motion_mag.py -i face.mp4 --gpu
@@ -332,6 +333,7 @@ python motion_mag.py -i face.mp4 --gpu -k 5 --biort near_sym_a --qshift qshift_a
 | `-w / --width` | 80 | Temporal filter width (frames) |
 | `--nlevels` | 8 | DTCWT decomposition levels |
 | `--fps` | from input | Output frame rate; required when the input doesn't report one |
+| `--color-space` | `rgb` | `rgb`: magnify R, G, B separately. `yiq`: magnify luma only and keep chroma (see below) |
 | `--jobs` | 2 | CPU worker processes/threads (1 = serial). Output does not depend on it |
 | `--gpu` | off | Enable GPU acceleration (requires PyTorch + pytorch_wavelets) |
 | `--device` | 0 | CUDA device index (for multi-GPU systems) |
@@ -354,7 +356,11 @@ Open the notebook and run all cells. It calls `motion_mag.py` (cloning the repos
 - Start with low magnification (k=3) and increase gradually.
 - Larger filter width → smoother temporal filtering, better for slow motions (breathing, pulse).
 - Fewer `nlevels` → faster processing but less spatial detail captured.
-- R, G, B channels are processed independently — color artifacts indicate magnification is too high.
+- By default R, G and B are magnified independently, so at higher `k` their phases drift apart and colour fringes appear. `--color-space yiq` magnifies only the luma (Y of YIQ) and keeps the colour (I, Q) of the input. It runs about 3.4x faster on the CPU (face.mp4 at k=5: 16 s instead of 56 s) and removes the fringing:
+
+  ![Input vs k=5 in rgb and yiq mode](.github/images/luma_vs_rgb.png)
+
+  On face.mp4 at k=5 the average colour change per pixel drops from 2.35 to 0.01 (I/Q units). One caveat: in strongly saturated areas (e.g. the red shirt) the added brightness can clip one channel at 0 or 255, which shifts that pixel toward grey.
 - Use `--gpu` for ~5x faster processing if you have an NVIDIA GPU.
 
 ---
