@@ -342,6 +342,8 @@ python motion_mag.py -i face.mp4 --gpu -k 5 --biort near_sym_a --qshift qshift_a
 - `--biort`: `antonini`, `legall`, `near_sym_a`, `near_sym_b`
 - `--qshift`: `qshift_06`, `qshift_a`, `qshift_b`, `qshift_c`, `qshift_d`
 
+Other names are rejected when the arguments are parsed.
+
 ### Notebook
 
 Open the notebook and run all cells. It calls `motion_mag.py` (cloning the repository first when run on Colab), magnifies the bundled `face.mp4`, saves `face_k3.avi`, and plots a before/after comparison. To use your own video, change the `filename` variable.
