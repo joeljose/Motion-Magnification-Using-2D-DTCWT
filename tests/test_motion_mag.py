@@ -216,6 +216,28 @@ class TestEstimateMemory:
         assert per_frame(gpu=True) < per_frame(gpu=False)
 
 
+def _oscillating_texture(n=96, amp=0.1, period=16, size=64):
+    """A smooth random texture shifted by amp * sin(2 pi t / period) pixels."""
+    base = ndimage.gaussian_filter(np.random.RandomState(0).rand(size, size), 2) * 255
+    spectrum = np.fft.fft2(base)
+    shifts = amp * np.sin(2 * np.pi * np.arange(n) / period)
+    frames = np.stack([np.real(np.fft.ifft2(ndimage.fourier_shift(spectrum, (0, s))))
+                       for s in shifts])
+    return frames, shifts
+
+
+def _shift_gain(clip, shifts):
+    """Regression slope of the per-frame horizontal shift of `clip` against
+    `shifts`, estimated from the image gradient (linear for sub-pixel motion)."""
+    mid = slice(24, 72)  # away from the temporal filter's edges
+    ref = clip[mid].mean(axis=0)
+    gx = np.gradient(ref, axis=1)[8:-8, 8:-8]
+    est = np.array([-(gx * (f - ref)[8:-8, 8:-8]).sum() / (gx * gx).sum()
+                    for f in clip[mid]])
+    s = shifts[mid] - shifts[mid].mean()
+    return (est - est.mean()) @ s / (s @ s)
+
+
 def _psnr(a, b):
     mse = np.mean((np.asarray(a, np.float64) - np.asarray(b, np.float64)) ** 2)
     return np.inf if mse == 0 else 10 * np.log10(255 ** 2 / mse)
@@ -291,26 +313,10 @@ class TestMagnifyMotions:
     @pytest.mark.parametrize("k", [2, 4])
     def test_motion_is_magnified_k_times(self, k):
         """A texture moving by 0.1 px * sin(2 pi t / 16) must move about k times
-        as far in the output. Shift is estimated per frame from the image
-        gradient (linear for sub-pixel motion)."""
-        n, amp, period = 96, 0.1, 16
-        base = ndimage.gaussian_filter(np.random.RandomState(0).rand(64, 64), 2) * 255
-        spectrum = np.fft.fft2(base)
-        shifts = amp * np.sin(2 * np.pi * np.arange(n) / period)
-        frames = np.stack([np.real(np.fft.ifft2(ndimage.fourier_shift(spectrum, (0, s))))
-                           for s in shifts])
-
-        def gain(clip):
-            mid = slice(24, 72)  # away from the temporal filter's edges
-            ref = clip[mid].mean(axis=0)
-            gx = np.gradient(ref, axis=1)[8:-8, 8:-8]
-            est = np.array([-(gx * (f - ref)[8:-8, 8:-8]).sum() / (gx * gx).sum()
-                            for f in clip[mid]])
-            s = shifts[mid] - shifts[mid].mean()
-            return (est - est.mean()) @ s / (s @ s)
-
+        as far in the output."""
+        frames, shifts = _oscillating_texture()
         out = motion_mag.magnify_motions(frames, magnification=k, width=20, nlevels=4)
-        ratio = gain(out) / gain(frames) / k
+        ratio = _shift_gain(out, shifts) / _shift_gain(frames, shifts) / k
         assert 0.8 <= ratio <= 1.2, ratio  # measured 0.95 (k=2), 0.93 (k=4)
 
     def test_golden_output(self):
@@ -328,6 +334,38 @@ class TestMagnifyMotions:
 # ---------------------------------------------------------------------------
 # Bug fix: load_video buffer guard
 # ---------------------------------------------------------------------------
+
+class TestLumaMode:
+    def _rgb_clip(self):
+        frames, shifts = _oscillating_texture()
+        # different brightness per channel, well inside 0-255 so nothing clips
+        return [frames * scale * 0.8 + 20 for scale in (1.0, 0.8, 0.6)], shifts
+
+    def test_luma_weights(self):
+        grey = [np.full((2, 4, 4), 100.0)] * 3
+        np.testing.assert_allclose(motion_mag.luma(grey), 100.0, rtol=1e-6)
+
+    @pytest.mark.parametrize("k", [2, 4])
+    def test_motion_is_magnified_k_times_in_luma_mode(self, k):
+        channels, shifts = self._rgb_clip()
+        out = motion_mag.magnify_luma(channels, lambda y: motion_mag.magnify_motions(
+            y, magnification=k, width=20, nlevels=4))
+        y_in, y_out = motion_mag.luma(channels), motion_mag.luma(out)
+        ratio = _shift_gain(y_out, shifts) / _shift_gain(y_in, shifts) / k
+        assert 0.8 <= ratio <= 1.2, ratio
+
+    def test_chroma_is_unchanged(self):
+        """I and Q must be kept (up to uint8 rounding) where nothing clips."""
+        channels, _ = self._rgb_clip()
+        out = motion_mag.magnify_luma(channels, lambda y: motion_mag.magnify_motions(
+            y, magnification=4, width=20, nlevels=4))
+
+        def iq(c):
+            r, g, b = (np.asarray(x, np.float64) for x in c)
+            return 0.596 * r - 0.274 * g - 0.322 * b, 0.211 * r - 0.523 * g + 0.312 * b
+        for before, after in zip(iq(channels), iq(out)):
+            assert np.abs(after - before).max() < 1.0
+
 
 class TestParallelJobs:
     def test_result_does_not_depend_on_jobs(self):
@@ -527,6 +565,15 @@ class TestCliEndToEnd:
         assert result.returncode == 0, result.stderr
         assert "Biort filter:    near_sym_a" in result.stdout
         assert "Qshift filter:   qshift_a" in result.stdout
+        self._check_output(out)
+
+    def test_luma_mode_run(self, tiny_video, tmp_path):
+        out = str(tmp_path / "out.avi")
+        result = run_cli_full("-i", tiny_video, "-o", out, "-w", "2", "--nlevels", "2",
+                              "--color-space", "yiq")
+        assert result.returncode == 0, result.stderr
+        assert "Color space:     yiq" in result.stdout
+        assert "Processing luma (Y) channel" in result.stdout
         self._check_output(out)
 
     def test_gpu_run(self, tiny_video, tmp_path):

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 - `--jobs N`: the CPU path runs the DTCWT in worker processes over blocks of frames (shared memory) and the phase step in threads over coefficient chunks. Default 2 workers: face.mp4 takes 56 s instead of 94 s, with lower peak memory (2.3 GiB). Output is identical for any `--jobs` (#36)
+- `--color-space yiq`: magnify luma only and keep the input's chroma. About 3.4x faster on the CPU and no colour fringing; the default stays `rgb`, so existing output is unchanged (#37)
 
 ### Fixed
 - CI failing on new ruff releases: dev tools pinned, lint rules set in `pyproject.toml` (#24)

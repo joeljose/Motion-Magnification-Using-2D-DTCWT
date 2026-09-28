@@ -876,6 +876,46 @@ def magnify_motions(data, magnification=3.0, width=80, nlevels=8,
         _POOL.pop('state', None)
 
 
+def _to_uint8(x):
+    return np.clip(np.rint(x), 0, 255).astype(np.uint8)
+
+
+# BT.601 luma weights for R, G, B: the Y of YIQ (and of YCrCb)
+_LUMA_WEIGHTS = (0.299, 0.587, 0.114)
+
+
+def luma(channels):
+    """BT.601 luma (Y) of R, G, B channel arrays, as float32."""
+    y = np.zeros(channels[0].shape, dtype=np.float32)
+    for weight, channel in zip(_LUMA_WEIGHTS, channels):
+        y += np.float32(weight) * channel
+    return y
+
+
+def magnify_luma(channels, magnify):
+    """Magnify motion in luma only, leaving chroma (I and Q) unchanged.
+
+    Converting to YIQ, replacing Y and converting back changes R, G and B
+    by the same amount (the Y column of the inverse YIQ matrix is all
+    ones), so this adds the magnified luma change to each channel. One
+    channel is magnified instead of three, and colours can't drift apart,
+    which is what causes colour fringing in per-channel (RGB) mode.
+
+    Args:
+        channels: List of 3 arrays [R, G, B], each (N, H, W), 0-255.
+        magnify: Function mapping a float32 (N, H, W) array to its magnified
+            version, e.g. a partial of magnify_motions.
+
+    Returns:
+        List of 3 uint8 arrays [R, G, B].
+    """
+    y = luma(channels)
+    delta = np.asarray(magnify(y), dtype=np.float32)
+    delta -= y
+    del y
+    return [_to_uint8(channel + delta) for channel in channels]
+
+
 # Filter names available in both dtcwt (CPU) and pytorch_wavelets (GPU)
 BIORT_FILTERS = ('antonini', 'legall', 'near_sym_a', 'near_sym_b')
 QSHIFT_FILTERS = ('qshift_06', 'qshift_a', 'qshift_b', 'qshift_c', 'qshift_d')
@@ -923,6 +963,11 @@ def main():
     parser.add_argument(
         '--fps', type=float, default=None,
         help='Frame rate of the output (default: from the input video)'
+    )
+    parser.add_argument(
+        '--color-space', choices=('rgb', 'yiq'), default='rgb',
+        help='rgb: magnify R, G and B separately (default). yiq: magnify '
+             'luma only and keep chroma; about 3x faster, no colour fringing'
     )
     parser.add_argument(
         '--jobs', type=int, default=None,
@@ -1043,15 +1088,14 @@ def main():
     backend = ("GPU (pytorch_wavelets, float32)" if args.gpu
                else f"CPU (dtcwt, {_default_jobs(args.jobs)} jobs)")
     print(f"  Backend:         {backend}")
+    print(f"  Color space:     {args.color_space}")
     print(f"  Magnification:   {args.magnification}x")
     print(f"  Filter width:    {args.width}")
     print(f"  DTCWT levels:    {args.nlevels}")
     print(f"  Biort filter:    {args.biort}")
     print(f"  Qshift filter:   {args.qshift}\n")
 
-    # --- Process each channel independently ---
-    channel_names = ['red', 'green', 'blue']
-
+    # --- Magnify ---
     if args.gpu:
         import torch
         device = torch.device('cuda', args.device)
@@ -1059,28 +1103,10 @@ def main():
         gpu_vram = torch.cuda.get_device_properties(args.device).total_memory
         print(f"GPU: {gpu_name} ({gpu_vram / 1024**3:.1f} GB VRAM)")
 
-    for idx, name in enumerate(channel_names):
-        print(f"Processing {name} channel...")
-        t0 = time.time()
-        if args.gpu:
-            try:
-                result = magnify_motions_gpu(
-                    channels[idx].astype(np.float32),
-                    magnification=args.magnification,
-                    width=args.width,
-                    nlevels=args.nlevels,
-                    biort=args.biort,
-                    qshift=args.qshift,
-                    device=device,
-                )
-            except torch.cuda.OutOfMemoryError:
-                print("Error: out of GPU memory even with single-frame batches. "
-                      "Try fewer --nlevels, a smaller or shorter clip, or the "
-                      "CPU path (omit --gpu).", file=sys.stderr)
-                sys.exit(1)
-        else:
-            result = magnify_motions(
-                channels[idx],
+    def magnify(data):
+        if not args.gpu:
+            return magnify_motions(
+                data,
                 magnification=args.magnification,
                 width=args.width,
                 nlevels=args.nlevels,
@@ -1088,10 +1114,32 @@ def main():
                 qshift=args.qshift,
                 jobs=args.jobs,
             )
-        # Keep only the uint8 result so finished channels cost 1 byte/pixel
-        channels[idx] = np.clip(np.rint(result), 0, 255).astype(np.uint8)
-        del result
-        print(f"  Done in {format_duration(time.time() - t0)}")
+        try:
+            return magnify_motions_gpu(
+                data,
+                magnification=args.magnification,
+                width=args.width,
+                nlevels=args.nlevels,
+                biort=args.biort,
+                qshift=args.qshift,
+                device=device,
+            )
+        except torch.cuda.OutOfMemoryError:
+            print("Error: out of GPU memory even with single-frame batches. "
+                  "Try fewer --nlevels, a smaller or shorter clip, or the "
+                  "CPU path (omit --gpu).", file=sys.stderr)
+            sys.exit(1)
+
+    t0 = time.time()
+    if args.color_space == 'yiq':
+        print("Processing luma (Y) channel...")
+        channels = magnify_luma(channels, magnify)
+    else:
+        for idx, name in enumerate(['red', 'green', 'blue']):
+            print(f"Processing {name} channel...")
+            # Keep only the uint8 result so finished channels cost 1 byte/pixel
+            channels[idx] = _to_uint8(magnify(channels[idx]))
+    print(f"  Done in {format_duration(time.time() - t0)}")
 
     # --- Save ---
     print("Saving output...")
