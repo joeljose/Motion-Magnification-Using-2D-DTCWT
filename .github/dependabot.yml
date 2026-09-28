@@ -8,3 +8,11 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    ignore:
+      # Base image versions are pinned on purpose: requirements.lock targets
+      # Python 3.11, and pytorch_wavelets is only tested with PyTorch 2.1.2.
+      # Only patch releases and digest refreshes are proposed.
+      - dependency-name: python
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: pytorch/pytorch
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
