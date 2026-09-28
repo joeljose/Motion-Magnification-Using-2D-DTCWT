@@ -29,6 +29,7 @@ Phase-based motion magnification amplifies subtle motions invisible to the naked
   - [Phase Extraction](#phase-extraction)
   - [Temporal Filtering](#temporal-filtering)
   - [Phase Modification and Reconstruction](#phase-modification-and-reconstruction)
+  - [Synthetic validation](#synthetic-validation)
 - [GPU Acceleration](#gpu-acceleration)
   - [Two-Pass Batched Architecture](#two-pass-batched-architecture)
   - [Chunked cuFFT Temporal Filtering](#chunked-cufft-temporal-filtering)
@@ -151,10 +152,11 @@ The band's upper edge must be below half the frame rate (15 Hz for 30 fps video)
 
 ### Limitations
 
-- **Higher k → more noise/artifacts** — amplification also amplifies phase noise, producing spatial artifacts at high magnification factors.
+- **Higher k → more noise/artifacts** — amplification also amplifies phase noise, producing spatial artifacts at high magnification factors. `--phase-sigma 1` reduces amplified noise in low-contrast, noisy video, at some cost in magnification (see [Synthetic validation](#synthetic-validation)).
+- **Output motion is somewhat below k** — the DTCWT's final lowpass band has no phase and is not magnified, so motion carried there is lost: a filled shape moves about 0.88k at 5 levels and 0.92k at 7; thin lines reach about k. Use the largest `--nlevels` the frame size allows.
 - **Memory intensive** — all frame pyramids must remain in memory simultaneously for temporal filtering. Long videos or high resolutions may require significant RAM.
 - **Slow on CPU** — DTCWT is computed on every frame × 3 color channels. Processing time scales linearly with frame count. The CPU path uses 2 workers by default (`--jobs`); the dtcwt transforms are memory-bound, so more workers only help on machines with more memory bandwidth. Use `--gpu` for a larger speedup.
-- **Large motions violate assumptions** — the phase-to-motion relationship is linear only for small displacements. Large motions produce phase wrapping artifacts.
+- **Large motions violate assumptions** — the phase-to-motion relationship is linear only for small displacements. Keep the *magnified* displacement under about 3 px: beyond 5 px, edges stop short of their magnified position and leave echo edges behind (see below). Lower `k` or narrow the band for larger motions.
 
 ---
 
@@ -183,6 +185,24 @@ After filtering, the baseline phase $\phi_0$ is subtracted from the total phase 
 An additional smoothing pass with width=2 removes high-frequency phase noise that would appear as spatial flickering. The final coefficients are reconstructed by preserving the original amplitude and applying the modified phase: $|h| \cdot e^{i\hat{\phi}}$.
 
 ---
+
+### Synthetic validation
+
+A shape whose radius pulses as `r(t) = r0 + r1·sin(2πft)` has an exact answer after magnification: the same shape with radius `r0 + k·r1·sin(2πft)`. `scripts/synthetic_shapes.py` renders pulsating circles, squares, rings and hollow squares with a camera-like blurred edge, magnifies them, and measures the edge position along 64 rays per frame. `tests/test_synthetic_shapes.py` turns the main results into permanent checks. The full study, with plots and all measurements, is in [docs/research/synthetic-validation.md](docs/research/synthetic-validation.md).
+
+| Check (k = 10) | Result |
+|---|---|
+| Gain vs pulsation frequency, 0.1–12 Hz | follows the flat-top filter model `H2(f)·(1 + (k−1)(1 − Hlow(f)))`; zero phase lag |
+| Band mode `--freq-low 0.8 --freq-high 2` | ~9× inside the band, 1.0× outside |
+| k = 1 | gain 1.003 (identity) |
+| Circle vs square, all edge directions | same gain within 2–3% (the 6 DTCWT orientations are isotropic) |
+| Filled circle, 5 / 7 levels | 0.88k / 0.92k (lowpass residual, see Limitations) |
+| 1–3 px rings, small motion | about 1.0k |
+| Magnified displacement 2 px / 3 px / 8 px (1 px ring) | 0.95k / 0.89k / 0.61k; echo edges appear from about 5 px |
+
+![Edges at 2 px and 8 px of magnified motion: input, output, ideal](docs/research/images/edges_2px_8px.png)
+
+Issue #39's proposals were measured the same way. Amplitude-weighted phase smoothing (`--phase-sigma`, CPU only, off by default) cuts amplified noise by about 21% and halo by about 25% in noisy low-contrast texture but lowers the magnification of clean edges by about 9% at σ = 1. A soft limit on the phase shift and skipping or selecting levels made results worse and were not kept.
 
 ## GPU Acceleration
 
@@ -342,6 +362,7 @@ python motion_mag.py -i face.mp4 --gpu -k 5 --biort near_sym_a --qshift qshift_a
 | `--fps` | from input | Output frame rate; required when the input doesn't report one |
 | `--color-space` | `rgb` | `rgb`: magnify R, G, B separately. `yiq`: magnify luma only and keep chroma (see below) |
 | `--jobs` | 2 | CPU worker processes/threads (1 = serial). Output does not depend on it |
+| `--phase-sigma` | 0 (off) | Amplitude-weighted phase smoothing, in coefficients (CPU only); try 1 for noisy, low-contrast video |
 | `--gpu` | off | Enable GPU acceleration (requires PyTorch + pytorch_wavelets) |
 | `--device` | 0 | CUDA device index (for multi-GPU systems) |
 | `--biort` | `near_sym_b` | Biorthogonal wavelet filter for DTCWT level 1 |
@@ -458,13 +479,18 @@ pyproject.toml             # ruff configuration
 scripts/
   verify_output.py         # CI check of the pipeline output
   make_golden.py           # Regenerates tests/data/golden_face.npz
+  synthetic_shapes.py      # Pulsating-shape renderer and analyser
+  bench_high_k.py          # Noise / halo benchmark at high k
 tests/
   test_motion_mag.py       # CPU unit tests
   test_motion_mag_gpu.py   # GPU-path tests (CUDA, or CPU tensors with CPU PyTorch)
+  test_synthetic_shapes.py # Correctness checks on pulsating shapes
   data/golden_face.npz     # Golden regression data
 docs/design/               # Architecture decision records
   gpu-acceleration.md      # GPU design doc
   dtcwt-hardening.md       # Hardening design doc
+docs/research/
+  synthetic-validation.md  # Pulsating-shape validation and the #39 high-k study
 VERSION                    # Release version (a test checks it matches __version__)
 CHANGELOG.md               # Release history
 CONTRIBUTING.md            # Contribution guidelines
