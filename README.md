@@ -139,12 +139,15 @@ Coefficients are reconstructed with the original amplitude and modified phase: $
 
 ### Applications
 
-| Application | Magnification (k) | Filter Width | What It Reveals |
+| Application | Magnification (k) | Band (`--freq-low`–`--freq-high`) | What It Reveals |
 |---|---|---|---|
-| Pulse / breathing | 3–10 | 80–120 | Chest movement, skin motion from heartbeat |
-| Structural vibration | 5–20 | 40–80 | Building sway, bridge oscillations |
-| Mechanical vibration | 10–50 | 20–60 | Machine vibrations, resonance modes |
-| Coronal seismology | 3–10 | 50–100 | Solar coronal loop oscillations |
+| Pulse | 5–15 | 0.8–2 Hz (48–120 bpm) | Skin motion from heartbeat |
+| Breathing | 3–10 | 0.15–0.5 Hz | Chest and shoulder movement |
+| Structural vibration | 5–20 | around the structure's mode, e.g. 0.5–5 Hz | Building sway, bridge oscillations |
+| Mechanical vibration | 10–50 | around the machine's frequency; needs fps > 2x that frequency | Machine vibrations, resonance modes |
+| Coronal seismology | 3–10 | from the loop's period and the image cadence (`--fps`) | Solar coronal loop oscillations |
+
+The band's upper edge must be below half the frame rate (15 Hz for 30 fps video).
 
 ### Limitations
 
@@ -167,7 +170,9 @@ The `normalize_phase()` function normalizes complex coefficients to unit magnitu
 
 `flattop_filter_1d()` applies a flat-top window (from `scipy.signal.windows.flattop`) as a low-pass smoothing kernel along the time axis. The window length is `round(width / 0.2327)`, forced odd so the filter is zero-phase. 0.2327 is an empirical width-to-length factor carried over from the reference IDL implementation (it is not the window's equivalent noise bandwidth, which is about 3.77 bins). This filter separates the slow baseline motion from the faster detail motion we want to amplify.
 
-In frequency terms, at 30 fps with the default `-w 80` the baseline filter (345 taps) has its half-amplitude point at about **0.20 Hz**, and the final smoothing filter (width 2, 9 taps) at about **8.6 Hz**. So motion between roughly 0.2 and 8.6 Hz is amplified. Both cutoffs scale with the frame rate, and the lower one scales inversely with `width`.
+**Band mode (`--freq-low` / `--freq-high`).** Instead of the width, give the band in Hz. The pipeline then uses an ideal temporal band-pass (`bandpass_1d`, FFT on a symmetrically extended series): phase motion inside the band is multiplied by `k`, motion outside it is left unchanged, and the width-2 smoothing is not applied. On a synthetic test with `--freq-low 0.8 --freq-high 2 -k 10` at 30 fps, a 1.2 Hz oscillation came out 9.2x larger, while 0.3 Hz and 5 Hz oscillations were unchanged (1.0x); at the band edges the gain is lower (6.4x at 0.8 Hz, 4.0x at 2 Hz) because the frame-rate-limited frequency resolution blurs the edge. The Parameters output always prints the band in Hz.
+
+**Width mode (`-w`, deprecated but still the default when no band is given).** In frequency terms, at 30 fps with the default `-w 80` the baseline filter (345 taps) has its half-amplitude point at about **0.20 Hz**, and the final smoothing filter (width 2, 9 taps) at about **8.6 Hz**. So motion between roughly 0.2 and 8.6 Hz is amplified. Both cutoffs scale with the frame rate, and the lower one scales inversely with `width`.
 
 For windows larger than 32 samples, the filter switches to FFT-based convolution (`scipy.signal.fftconvolve`) for a ~4x speedup. Both paths use the same boundary rule (the edge sample repeated, i.e. ndimage `reflect`), and a test checks that they agree to 1e-10.
 
@@ -317,6 +322,7 @@ The GPU Docker image is based on `pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime`
 python motion_mag.py -i face.mp4
 python motion_mag.py -i face.mp4 -o magnified.avi -k 5
 python motion_mag.py -i face.mp4 -k 3 -w 80 --nlevels 6
+python motion_mag.py -i face.mp4 -k 10 --freq-low 0.8 --freq-high 2   # pulse band only
 python motion_mag.py -i face.mp4 -k 5 --color-space yiq   # luma only: ~3x faster, no colour fringing
 
 # GPU
@@ -330,7 +336,8 @@ python motion_mag.py -i face.mp4 --gpu -k 5 --biort near_sym_a --qshift qshift_a
 | `-i / --input` | *(required)* | Input video path |
 | `-o / --output` | `<input>_magnified.avi` | Output video path |
 | `-k / --magnification` | 3 | Magnification factor |
-| `-w / --width` | 80 | Temporal filter width (frames) |
+| `--freq-low`, `--freq-high` | — | Amplified band in Hz (ideal band-pass); use both, instead of `-w` |
+| `-w / --width` | 80 | Temporal filter width in frames (deprecated: prefer the band options) |
 | `--nlevels` | 8 | DTCWT decomposition levels |
 | `--fps` | from input | Output frame rate; required when the input doesn't report one |
 | `--color-space` | `rgb` | `rgb`: magnify R, G, B separately. `yiq`: magnify luma only and keep chroma (see below) |
@@ -354,7 +361,7 @@ Open the notebook and run all cells. It calls `motion_mag.py` (cloning the repos
 ### Tips
 
 - Start with low magnification (k=3) and increase gradually.
-- Larger filter width → smoother temporal filtering, better for slow motions (breathing, pulse).
+- Prefer `--freq-low`/`--freq-high` around the motion you care about (see Applications): a narrow band amplifies less noise than the default ~0.2–8.6 Hz. With `-w`, a larger width lowers the band's lower edge.
 - Fewer `nlevels` → faster processing but less spatial detail captured.
 - By default R, G and B are magnified independently, so at higher `k` their phases drift apart and colour fringes appear. `--color-space yiq` magnifies only the luma (Y of YIQ) and keeps the colour (I, Q) of the input. It runs about 3.4x faster on the CPU (face.mp4 at k=5: 16 s instead of 56 s) and removes the fringing:
 

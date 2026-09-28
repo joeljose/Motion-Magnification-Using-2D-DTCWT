@@ -226,10 +226,10 @@ def _oscillating_texture(n=96, amp=0.1, period=16, size=64):
     return frames, shifts
 
 
-def _shift_gain(clip, shifts):
+def _shift_gain(clip, shifts, mid=slice(24, 72)):
     """Regression slope of the per-frame horizontal shift of `clip` against
-    `shifts`, estimated from the image gradient (linear for sub-pixel motion)."""
-    mid = slice(24, 72)  # away from the temporal filter's edges
+    `shifts`, estimated from the image gradient (linear for sub-pixel motion).
+    `mid` picks frames away from the temporal filter's edges."""
     ref = clip[mid].mean(axis=0)
     gx = np.gradient(ref, axis=1)[8:-8, 8:-8]
     est = np.array([-(gx * (f - ref)[8:-8, 8:-8]).sum() / (gx * gx).sum()
@@ -334,6 +334,35 @@ class TestMagnifyMotions:
 # ---------------------------------------------------------------------------
 # Bug fix: load_video buffer guard
 # ---------------------------------------------------------------------------
+
+class TestBandMode:
+    FPS = 30.0
+
+    @pytest.mark.parametrize("freq, expected", [(1.2, (8, 12)), (0.3, (0, 2)), (5.0, (0, 2))])
+    def test_only_in_band_motion_is_amplified(self, freq, expected):
+        """--freq-low 0.8 --freq-high 2 -k 10: a 1.2 Hz oscillation is
+        amplified about 10x, 0.3 Hz and 5 Hz less than 2x."""
+        frames, shifts = _oscillating_texture(n=300, amp=0.03, period=self.FPS / freq)
+        out = motion_mag.magnify_motions(frames, magnification=10, nlevels=4,
+                                         band=(0.8 / self.FPS, 2.0 / self.FPS))
+        mid = slice(50, 250)
+        gain = _shift_gain(out, shifts, mid) / _shift_gain(frames, shifts, mid)
+        assert expected[0] <= gain <= expected[1], gain
+
+    def test_bandpass_keeps_only_the_band(self):
+        t = np.arange(600)
+        low_f, mid_f, high_f = 0.01, 0.05, 0.2  # cycles per frame
+        x = (np.sin(2 * np.pi * low_f * t) + np.sin(2 * np.pi * mid_f * t)
+             + np.sin(2 * np.pi * high_f * t))[:, None]
+        y = motion_mag.bandpass_1d(x, 0.03, 0.08)[:, 0]
+        expected = np.sin(2 * np.pi * mid_f * t)
+        assert np.abs(y - expected)[100:500].max() < 0.05
+
+    def test_flattop_band_matches_documented_defaults(self):
+        low, high = motion_mag.flattop_band(80)
+        assert low * 30 == pytest.approx(0.20, abs=0.01)
+        assert high * 30 == pytest.approx(8.6, abs=0.1)
+
 
 class TestLumaMode:
     def _rgb_clip(self):
@@ -567,6 +596,20 @@ class TestCliEndToEnd:
         assert "Qshift filter:   qshift_a" in result.stdout
         self._check_output(out)
 
+    def test_band_mode_run(self, tiny_video, tmp_path):
+        out = str(tmp_path / "out.avi")
+        result = run_cli_full("-i", tiny_video, "-o", out, "--nlevels", "2",
+                              "--freq-low", "2", "--freq-high", "8")
+        assert result.returncode == 0, result.stderr
+        assert "Band:            2–8 Hz (ideal band-pass)" in result.stdout
+        self._check_output(out)
+
+    def test_default_band_is_printed(self, tiny_video, tmp_path):
+        result = run_cli_full("-i", tiny_video, "-o", str(tmp_path / "o.avi"), "--nlevels", "2")
+        assert result.returncode == 0, result.stderr
+        assert "Band:            ~0.20–8.59 Hz (flat-top, width 80)" in result.stdout
+        assert "deprecated" not in result.stderr
+
     def test_luma_mode_run(self, tiny_video, tmp_path):
         out = str(tmp_path / "out.avi")
         result = run_cli_full("-i", tiny_video, "-o", out, "-w", "2", "--nlevels", "2",
@@ -651,6 +694,27 @@ class TestInputValidation:
         code, stderr = run_cli("-i", dummy_video, "--biort", "near_sym_x")
         assert code == 2
         assert "invalid choice: 'near_sym_x'" in stderr
+
+    @pytest.mark.parametrize("args, message", [
+        (["--freq-low", "1"], "must be given together"),
+        (["--freq-low", "2", "--freq-high", "1"], "need 0 < --freq-low < --freq-high"),
+        (["--freq-low", "1", "--freq-high", "2", "-w", "80"], "not both"),
+    ])
+    def test_band_arguments_validated(self, dummy_video, args, message):
+        code, stderr = run_cli("-i", dummy_video, *args)
+        assert code == 1
+        assert message in stderr
+
+    def test_band_above_nyquist(self, tiny_video):
+        code, stderr = run_cli("-i", tiny_video, "--freq-low", "1", "--freq-high", "20")
+        assert code == 1
+        assert "above the Nyquist frequency (15 Hz at 30 fps)" in stderr
+
+    def test_width_is_deprecated(self, tiny_video, tmp_path):
+        result = run_cli_full("-i", tiny_video, "-o", str(tmp_path / "o.avi"),
+                              "-w", "2", "--nlevels", "2")
+        assert result.returncode == 0
+        assert "-w/--width is deprecated" in result.stderr
 
     def test_jobs_zero(self, dummy_video):
         code, stderr = run_cli("-i", dummy_video, "--jobs", "0")
