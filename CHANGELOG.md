@@ -7,8 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-09-28
+
 ### Added
-- `--jobs N`: the CPU path runs the DTCWT in worker processes over blocks of frames (shared memory) and the phase step in threads over coefficient chunks. Default 2 workers: face.mp4 takes 56 s instead of 94 s, with lower peak memory (2.3 GiB). Output is identical for any `--jobs` (#36)
+- `--jobs N`: the CPU path runs the DTCWT in worker processes over blocks of frames (shared memory) and the phase step in threads over coefficient chunks. Default 2 workers: face.mp4 takes ~60 s instead of 94 s, with lower peak memory (2.5 GiB, final figure after #69). Output is identical for any `--jobs` (#36)
 - `--color-space yiq`: magnify luma only and keep the input's chroma. About 3.4x faster on the CPU and no colour fringing; the default stays `rgb`, so existing output is unchanged (#37)
 - `--freq-low` / `--freq-high`: set the amplified band in Hz; uses an ideal temporal band-pass (CPU and GPU). The Parameters output shows the band in Hz in both modes. `-w` still works (and stays the default) but is deprecated (#38)
 - `--phase-sigma`: amplitude-weighted spatial smoothing of the amplified phase (CPU), off by default. Synthetic validation with pulsating shapes (`scripts/synthetic_shapes.py`, `tests/test_synthetic_shapes.py`) and a high-k benchmark (`scripts/bench_high_k.py`); the README documents the results, including why output motion is somewhat below k and the ~3 px displacement limit (#39)
@@ -30,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - CPU workers were started with `fork` (unsafe when OpenCV/BLAS/FFT threads are running) and read their state from a module-level dict (two calls at once in one process would clash). Workers now start with `forkserver` (or `spawn`) and open each call's arrays by path from anonymous in-memory files (`memfd_create`; temp files elsewhere), so there is no shared module state; the CPU path also works on platforms without `fork` now. Cost: face.mp4 at `--jobs 2` takes ~60 s instead of ~56 s and peaks at 2.5 GiB instead of 2.3 GiB; output is unchanged. Scripts that call `magnify_motions` with `jobs` > 1 need an `if __name__ == "__main__":` guard (#69)
 
 ### Changed
+- **BREAKING**: output differs from 2.0.0 for the same settings: the temporal filter is now centred (odd windows, #29), pixels are rounded instead of truncated (#43), exact-zero coefficients no longer turn black (#22), and the CPU path computes in float32/complex64 (#26). Differences are small (face.mp4: 58.9 dB PSNR against 2.0.0 for the precision change) but not bit-identical.
+- **BREAKING** (library API): `load_video` returns uint8 channels (was float64); `magnify_motions` returns float32 (was the input dtype) and takes new keyword arguments (`jobs`, `band`, `phase_sigma`); `estimate_memory` takes `jobs`; `extract_temporal_phases` returns float32. Scripts that call `magnify_motions` with `jobs` > 1 need an `if __name__ == "__main__":` guard (#36, #69).
+- **BREAKING** (Docker): images no longer take `UID`/`GID`/`UNAME` build args and run as a fixed user; use `--user "$(id -u):$(id -g)"` for bind mounts. The GPU image's entrypoint passes `--gpu` (#27, #33).
+- `-w/--width` is deprecated in favour of `--freq-low`/`--freq-high` (#38); it still works and stays the default.
 - Reproducible builds: Docker images install from hash-locked `requirements.lock` / `requirements-gpu.lock`, `pytorch_wavelets` is pinned to a commit, base images and GitHub Actions are pinned by digest/SHA, and Dependabot watches them. `opencv-python-headless` is used everywhere. Images use a fixed non-root user, so `docker build .` needs no build args; run with `--user "$(id -u):$(id -g)"` for bind mounts (#33)
 - GPU path: batches and FFT chunks that run out of GPU memory are retried at half the size; an invalid `--device` gives a clean error; the GPU code runs on CPU tensors too, and CI runs its tests with CPU PyTorch (#34)
 
