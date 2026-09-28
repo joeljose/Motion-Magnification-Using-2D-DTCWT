@@ -13,7 +13,7 @@
 
 Phase-based motion magnification amplifies subtle motions invisible to the naked eye. Unlike Eulerian (color-based) methods that amplify pixel intensity changes, phase-based magnification operates on the phase of complex wavelet coefficients — which directly encode local position — enabling 10–100x amplification with fewer artifacts. This is a Python implementation based on [Wadhwa et al. (SIGGRAPH 2013)](https://people.csail.mit.edu/nwadhwa/phase-video/) using the 2D Dual-Tree Complex Wavelet Transform.
 
-**v2.0.0** adds GPU acceleration via PyTorch, delivering ~5x end-to-end speedup on CUDA-capable GPUs.
+**v3.0.0** adds a band in Hz (`--freq-low/--freq-high`), a luma-only mode (`--color-space yiq`, ~3x faster), parallel CPU processing (`--jobs`), 3x lower CPU memory, validation against synthetic ground truth, and many correctness fixes; see [Breaking changes](#breaking-changes) and the [CHANGELOG](CHANGELOG.md). v2.0.0 added GPU acceleration via PyTorch.
 
 ---
 
@@ -44,7 +44,7 @@ Phase-based motion magnification amplifies subtle motions invisible to the naked
   - [CLI Tool](#cli-tool)
   - [Notebook](#notebook)
   - [Tips](#tips)
-- [v2.0.0 Breaking Changes](#v200-breaking-changes)
+- [Breaking Changes](#breaking-changes)
 - [Development](#development)
   - [Running Tests](#running-tests)
   - [Versioning](#versioning)
@@ -395,7 +395,16 @@ Open the notebook and run all cells. It calls `motion_mag.py` (cloning the repos
 
 ---
 
-## v2.0.0 Breaking Changes
+## Breaking Changes
+
+### v3.0.0
+
+- **Output differs from v2.0.0** for the same settings: the temporal filter is now centred, pixels are rounded instead of truncated, exact-zero coefficients no longer turn black, and the CPU path computes in float32. Differences are small (58.9 dB PSNR on face.mp4 for the precision change) but not bit-identical.
+- **Library API:** `load_video` returns uint8 channels; `magnify_motions` returns float32 and has new keyword arguments (`jobs`, `band`, `phase_sigma`). With `jobs` > 1, scripts that call it need an `if __name__ == "__main__":` guard.
+- **Docker:** no more `UID`/`GID`/`UNAME` build args; run with `--user "$(id -u):$(id -g)"` for bind mounts. The GPU image runs the GPU path by default.
+- **CLI:** `-w/--width` is deprecated (prefer `--freq-low/--freq-high`); `--biort`/`--qshift` only accept the listed filter names.
+
+### v2.0.0
 
 - **Default wavelet filters changed** from `near_sym_a`/`qshift_a` to `near_sym_b`/`qshift_b`. The longer `near_sym_b` filters produce fewer block artifacts at higher magnification factors (k=5+). To restore v1.x behavior:
   ```bash
