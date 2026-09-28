@@ -364,6 +364,20 @@ class TestBandMode:
         assert high * 30 == pytest.approx(8.6, abs=0.1)
 
 
+class TestPhaseSigma:
+    def test_reduces_amplified_noise_in_low_contrast_texture(self):
+        """Static low-contrast texture + sensor noise at k=10: amplitude-weighted
+        phase smoothing must lower the output's temporal noise."""
+        rng = np.random.RandomState(0)
+        texture = 110 + 30 * ndimage.gaussian_filter(rng.randn(64, 64), 1.5)
+        clip = texture + rng.normal(0, 2, (60, 64, 64))
+        kwargs = dict(magnification=10, width=20, nlevels=4)
+        plain = motion_mag.magnify_motions(clip, **kwargs)
+        smooth = motion_mag.magnify_motions(clip, phase_sigma=1.0, **kwargs)
+        mid = slice(10, 50)
+        assert smooth[mid].std(axis=0).mean() < 0.9 * plain[mid].std(axis=0).mean()
+
+
 class TestLumaMode:
     def _rgb_clip(self):
         frames, shifts = _oscillating_texture()
@@ -715,6 +729,16 @@ class TestInputValidation:
                               "-w", "2", "--nlevels", "2")
         assert result.returncode == 0
         assert "-w/--width is deprecated" in result.stderr
+
+    def test_phase_sigma_validated(self, dummy_video):
+        code, stderr = run_cli("-i", dummy_video, "--phase-sigma", "-1")
+        assert code == 1
+        assert "--phase-sigma must be >= 0" in stderr
+
+    def test_phase_sigma_is_cpu_only(self, dummy_video):
+        code, stderr = run_cli("-i", dummy_video, "--phase-sigma", "1", "--gpu")
+        assert code == 1
+        assert "only supported on the CPU path" in stderr
 
     def test_jobs_zero(self, dummy_video):
         code, stderr = run_cli("-i", dummy_video, "--jobs", "0")

@@ -853,7 +853,8 @@ def _default_jobs(jobs):
 
 
 def magnify_motions(data, magnification=3.0, width=80, nlevels=8,
-                    biort='near_sym_b', qshift='qshift_b', jobs=None, band=None):
+                    biort='near_sym_b', qshift='qshift_b', jobs=None, band=None,
+                    phase_sigma=0.0):
     """Run the phase-based motion magnification pipeline on a single channel.
 
     The algorithm:
@@ -887,6 +888,11 @@ def magnify_motions(data, magnification=3.0, width=80, nlevels=8,
             an ideal band-pass replaces steps 3-5: motion inside the band is
             multiplied by `magnification`, motion outside is left unchanged,
             and `width` is ignored.
+        phase_sigma: If > 0, smooth the detail phase spatially with a
+            Gaussian of this sigma (in coefficients of each level), weighted
+            by coefficient amplitude, before amplifying (Wadhwa et al. 2013).
+            Suppresses amplified noise in low-contrast texture, but lowers the
+            magnification of clean edges (about 9% at sigma 1); off by default.
 
     Returns:
         float32 array of the same shape as the input, with magnified motions.
@@ -916,39 +922,66 @@ def magnify_motions(data, magnification=3.0, width=80, nlevels=8,
         # reconstructed coefficients overwrite the originals in place
         print("  Modifying phase...")
 
-        def process(coeffs, start):
-            chunk = coeffs[:, start:start + _PHASE_CHUNK]
+        k1 = np.float32(magnification - 1)
 
-            # Step 2: Extract cumulative temporal phase
-            phase = temporal_phase(chunk)
-
+        def detail(phase):
+            """Step 3: the part of the phase motion to amplify."""
             if band is not None:
-                # Steps 3-5 as one band-pass: amplify only in-band motion
-                phase += np.float32(magnification - 1) * bandpass_1d(phase, *band)
-                chunk[:] = np.abs(chunk) * np.exp(1j * phase)
-                return
+                return bandpass_1d(phase, *band)
+            # Temporal filtering — separate base motion from detail
+            return phase - flattop_filter_1d(phase, width, axis=0, mode='reflect')
 
-            # Step 3: Temporal filtering — separate base motion from detail
-            phase0 = flattop_filter_1d(phase, width, axis=0, mode='reflect')
-
-            # Step 4: Amplify detail phase deviations by magnification factor
-            phase -= phase0
-            phase *= magnification
-            phase += phase0
-            del phase0
-
+        def finish(chunk, phase, d):
+            """Steps 4-5 and reconstruction, in place on the coefficients."""
+            # Step 4: Amplify detail: phase0 + (phase - phase0) * k
+            d *= k1
+            phase += d
             # Step 5: Additional smoothing to remove high-frequency phase noise
-            phase = flattop_filter_1d(phase, 2.0, axis=0, mode='reflect')
-
+            if band is None:
+                phase = flattop_filter_1d(phase, 2.0, axis=0, mode='reflect')
             # Reconstruct coefficients: preserve amplitude, replace phase
             chunk[:] = np.abs(chunk) * np.exp(1j * phase)
+
+        def process(coeffs, start):
+            chunk = coeffs[:, start:start + _PHASE_CHUNK]
+            # Step 2: Extract cumulative temporal phase
+            phase = temporal_phase(chunk)
+            finish(chunk, phase, detail(phase))
+
+        def store_detail(coeffs, details, start):
+            cols = slice(start, start + _PHASE_CHUNK)
+            details[:, cols] = detail(temporal_phase(coeffs[:, cols]))
+
+        def smooth_frame(hp, details, i):
+            # Amplitude-weighted spatial smoothing of one frame's detail phase
+            # (Wadhwa et al. 2013): low-amplitude coefficients have unreliable
+            # phase, so neighbours with more energy decide their motion
+            amp = np.abs(hp[i])
+            d = details[i].reshape(amp.shape)
+            sigma = (phase_sigma, phase_sigma, 0)
+            num = ndimage.gaussian_filter(amp * d, sigma, mode='reflect')
+            den = ndimage.gaussian_filter(amp, sigma, mode='reflect')
+            details[i] = (num / np.maximum(den, 1e-20)).ravel()
+
+        def apply_detail(coeffs, details, start):
+            cols = slice(start, start + _PHASE_CHUNK)
+            chunk = coeffs[:, cols]
+            finish(chunk, temporal_phase(chunk), details[:, cols])
 
         with ThreadPoolExecutor(jobs) as threads:
             for level, hp in enumerate(state['highpasses']):
                 print(f"    Level {level + 1}/{nlevels}")
                 coeffs = hp.reshape(num_frames, -1)
-                list(threads.map(lambda start, c=coeffs: process(c, start),
-                                 range(0, coeffs.shape[1], _PHASE_CHUNK)))
+                starts = range(0, coeffs.shape[1], _PHASE_CHUNK)
+                if not phase_sigma:
+                    list(threads.map(lambda st, c=coeffs: process(c, st), starts))
+                    continue
+                # Spatial smoothing needs whole frames, so the detail phase of
+                # the level is stored, smoothed per frame, then applied
+                details = np.empty(coeffs.shape, dtype=np.float32)
+                list(threads.map(lambda st: store_detail(coeffs, details, st), starts))
+                list(threads.map(lambda i: smooth_frame(hp, details, i), range(num_frames)))
+                list(threads.map(lambda st: apply_detail(coeffs, details, st), starts))
 
         # Step 6: Inverse DTCWT
         print("  Inverse DTCWT...")
@@ -1049,6 +1082,12 @@ def main():
         help='Upper edge of the amplified band in Hz (use with --freq-low)'
     )
     parser.add_argument(
+        '--phase-sigma', type=float, default=0.0,
+        help='Amplitude-weighted spatial smoothing of the amplified phase, in '
+             'coefficients (CPU only; default: 0 = off). Try 1 for noisy, '
+             'low-contrast video; costs some magnification of clean edges'
+    )
+    parser.add_argument(
         '--nlevels', type=int, default=8,
         help='Number of DTCWT decomposition levels (default: 8)'
     )
@@ -1119,6 +1158,13 @@ def main():
 
     if args.nlevels < 1:
         print("Error: --nlevels must be at least 1", file=sys.stderr)
+        sys.exit(1)
+
+    if not (np.isfinite(args.phase_sigma) and args.phase_sigma >= 0):
+        print("Error: --phase-sigma must be >= 0", file=sys.stderr)
+        sys.exit(1)
+    if args.phase_sigma and args.gpu:
+        print("Error: --phase-sigma is only supported on the CPU path", file=sys.stderr)
         sys.exit(1)
 
     if args.jobs is not None and args.jobs < 1:
@@ -1201,6 +1247,8 @@ def main():
                else f"CPU (dtcwt, {_default_jobs(args.jobs)} jobs)")
     print(f"  Backend:         {backend}")
     print(f"  Color space:     {args.color_space}")
+    if args.phase_sigma:
+        print(f"  Phase sigma:     {args.phase_sigma:g}")
     print(f"  Magnification:   {args.magnification}x")
     if band_mode:
         if args.freq_high > fps / 2:
@@ -1238,6 +1286,7 @@ def main():
                 qshift=args.qshift,
                 jobs=args.jobs,
                 band=band,
+                phase_sigma=args.phase_sigma,
             )
         try:
             return magnify_motions_gpu(
