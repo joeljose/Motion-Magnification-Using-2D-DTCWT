@@ -206,6 +206,12 @@ class TestMagnifyMotionsGpu:
         )
         assert np.all(np.isfinite(result))
 
+    def test_float64_input_accepted(self):
+        data = np.random.RandomState(0).rand(6, 16, 16) * 255  # float64
+        result = motion_mag.magnify_motions_gpu(data, width=3, nlevels=2, device=DEVICE)
+        assert result.dtype == np.float32
+        assert result.shape == data.shape
+
     def test_output_in_reasonable_range(self):
         """Output pixel values should be in a plausible range."""
         rng = np.random.RandomState(42)

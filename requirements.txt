@@ -1,3 +1,4 @@
+# numpy<2: dtcwt 0.14 uses APIs removed in NumPy 2 (np.asfarray, np.issubsctype)
 scipy>=1.7.1,<2
 numpy>=1.20.3,<2
 dtcwt>=0.12.0,<1

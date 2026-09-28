@@ -421,6 +421,19 @@ class TestSaveVideo:
                 motion_mag.save_video(channels, 30.0, str(tmp_path / "o.avi"), (8, 8))
         mock_writer.write.assert_not_called()
 
+    def test_rounds_instead_of_truncating(self, tmp_path):
+        """Values just under an integer must round up, not drop a level."""
+        channels = [np.full((1, 8, 8), 99.9999) for _ in range(3)]
+        written = {}
+        mock_writer = MagicMock()
+        mock_writer.isOpened.return_value = True
+        mock_writer.write.side_effect = lambda frame: written.setdefault("f", frame.copy())
+        path = tmp_path / "o.avi"
+        path.write_bytes(b"x")  # the size check after release needs a file
+        with patch("cv2.VideoWriter", return_value=mock_writer):
+            motion_mag.save_video(channels, 30.0, str(path), (8, 8))
+        assert (written["f"] == 100).all()
+
     def test_writes_readable_file(self, tmp_path):
         channels = [np.full((3, 16, 16), 100.0) for _ in range(3)]
         path = str(tmp_path / "o.avi")
@@ -557,6 +570,19 @@ class TestInputValidation:
         code, stderr = run_cli("-i", dummy_video, "-w", "0")
         assert code == 1
         assert "--width must be positive" in stderr
+
+    @pytest.mark.parametrize("flag", ["-k", "-w"])
+    @pytest.mark.parametrize("value", ["nan", "inf"])
+    def test_non_finite_values_rejected(self, dummy_video, flag, value):
+        code, stderr = run_cli("-i", dummy_video, flag, value)
+        assert code == 1
+        assert "must be positive and finite" in stderr
+        assert "Traceback" not in stderr
+
+    def test_unknown_filter_name_rejected_before_loading(self, dummy_video):
+        code, stderr = run_cli("-i", dummy_video, "--biort", "near_sym_x")
+        assert code == 2
+        assert "invalid choice: 'near_sym_x'" in stderr
 
     def test_nlevels_zero(self, dummy_video):
         code, stderr = run_cli("-i", dummy_video, "--nlevels", "0")

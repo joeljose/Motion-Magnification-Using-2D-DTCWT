@@ -313,8 +313,8 @@ def load_video(path):
 def save_video(channels, fps, path, frame_size):
     """Save R, G, B channel arrays to an AVI video file.
 
-    Recombines the three channels into BGR frames, clips to [0, 255],
-    and writes using MJPG codec.
+    Recombines the three channels into BGR frames, rounds and clips to
+    [0, 255], and writes using MJPG codec.
 
     Args:
         channels: List of 3 numpy arrays [R, G, B], each (N, H, W).
@@ -337,9 +337,9 @@ def save_video(channels, fps, path, frame_size):
             (frame_count, channels[0].shape[1], channels[0].shape[2], 3),
             dtype=np.uint8
         )
-        result[:, :, :, 2] = np.nan_to_num(np.clip(channels[0], 0, 255)).astype(np.uint8)
-        result[:, :, :, 1] = np.nan_to_num(np.clip(channels[1], 0, 255)).astype(np.uint8)
-        result[:, :, :, 0] = np.nan_to_num(np.clip(channels[2], 0, 255)).astype(np.uint8)
+        result[:, :, :, 2] = np.nan_to_num(np.clip(np.rint(channels[0]), 0, 255)).astype(np.uint8)
+        result[:, :, :, 1] = np.nan_to_num(np.clip(np.rint(channels[1]), 0, 255)).astype(np.uint8)
+        result[:, :, :, 0] = np.nan_to_num(np.clip(np.rint(channels[2]), 0, 255)).astype(np.uint8)
 
         for i in range(frame_count):
             writer.write(result[i])
@@ -651,7 +651,8 @@ def magnify_motions_gpu(data, magnification=3.0, width=80, nlevels=8,
     coefficient chunk does not fit.
 
     Args:
-        data: 3D numpy array (num_frames, height, width), float32.
+        data: 3D numpy array (num_frames, height, width), any real dtype
+            (converted to float32).
         magnification: Amplification factor for phase deviations.
         width: Temporal filter width in frames.
         nlevels: Number of DTCWT decomposition levels.
@@ -665,6 +666,7 @@ def magnify_motions_gpu(data, magnification=3.0, width=80, nlevels=8,
     import torch
     if device is None:
         device = torch.device('cuda')
+    data = np.asarray(data, dtype=np.float32)  # the torch DTCWT modules are float32
 
     # Pass 1: Forward DTCWT + phase extraction
     print("  GPU Forward DTCWT + phase extraction...")
@@ -791,6 +793,10 @@ def magnify_motions(data, magnification=3.0, width=80, nlevels=8,
     return result
 
 
+# Filter names available in both dtcwt (CPU) and pytorch_wavelets (GPU)
+BIORT_FILTERS = ('antonini', 'legall', 'near_sym_a', 'near_sym_b')
+QSHIFT_FILTERS = ('qshift_06', 'qshift_a', 'qshift_b', 'qshift_c', 'qshift_d')
+
 # Fewer frames than this leave nothing for the temporal filter to separate
 _MIN_FRAMES = 3
 
@@ -844,11 +850,11 @@ def main():
         help='CUDA device index (default: 0)'
     )
     parser.add_argument(
-        '--biort', default='near_sym_b',
+        '--biort', default='near_sym_b', choices=BIORT_FILTERS,
         help='DTCWT biorthogonal filter (default: near_sym_b)'
     )
     parser.add_argument(
-        '--qshift', default='qshift_b',
+        '--qshift', default='qshift_b', choices=QSHIFT_FILTERS,
         help='DTCWT quarter-shift filter (default: qshift_b)'
     )
 
@@ -859,12 +865,12 @@ def main():
         print(f"Error: input file not found: {args.input}", file=sys.stderr)
         sys.exit(1)
 
-    if args.magnification <= 0:
-        print("Error: --magnification must be positive", file=sys.stderr)
+    if not (np.isfinite(args.magnification) and args.magnification > 0):
+        print("Error: --magnification must be positive and finite", file=sys.stderr)
         sys.exit(1)
 
-    if args.width <= 0:
-        print("Error: --width must be positive", file=sys.stderr)
+    if not (np.isfinite(args.width) and args.width > 0):
+        print("Error: --width must be positive and finite", file=sys.stderr)
         sys.exit(1)
 
     if args.nlevels < 1:

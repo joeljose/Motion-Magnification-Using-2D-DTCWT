@@ -1,3 +1,4 @@
+# numpy<2: dtcwt 0.14 and pytorch_wavelets use APIs removed in NumPy 2
 scipy>=1.7.1,<2
 numpy>=1.20.3,<2
 opencv-python-headless>=4.7.0,<5
