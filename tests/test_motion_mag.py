@@ -18,6 +18,11 @@ import motion_mag
 # Helpers
 # ---------------------------------------------------------------------------
 
+def test_version_matches_version_file():
+    with open(os.path.join(os.path.dirname(SCRIPT), "VERSION")) as f:
+        assert motion_mag.__version__ == f.read().strip()
+
+
 class TestFormatDuration:
     def test_seconds_only(self):
         assert motion_mag.format_duration(30.0) == "30.0s"

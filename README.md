@@ -119,7 +119,7 @@ Each video frame is decomposed into `nlevels` scales × 6 orientations, producin
 
 **2. Phase Extraction**
 
-Cumulative phase is computed via frame-to-frame complex division. For each coefficient, dividing frame $t$'s normalized value by frame $t-1$'s gives the phase ratio. Taking `angle()` and `cumsum()` produces $\phi(t)$ — the absolute phase relative to frame 0. Complex division is more numerically stable than direct phase subtraction because it naturally handles phase wrapping at $\pm\pi$ boundaries.
+Cumulative phase is computed from frame-to-frame phase changes. For each coefficient, multiplying frame $t$'s normalized value by the conjugate of frame $t-1$'s gives the phase change. Taking `angle()` and `cumsum()` produces $\phi(t)$ — the absolute phase relative to frame 0. This handles phase wrapping at $\pm\pi$, unlike subtracting angles, and a zero coefficient gives no phase change.
 
 **3. Temporal Filtering**
 
@@ -161,13 +161,15 @@ Coefficients are reconstructed with the original amplitude and modified phase: $
 
 The `normalize_phase()` function normalizes complex coefficients to unit magnitude ($x / |x|$), preserving only the phase information. Elements with magnitude below $10^{-20}$ are left unchanged to avoid division by zero.
 
-`extract_temporal_phases()` computes frame-to-frame phase changes via complex division — dividing the current frame's normalized coefficients by the previous frame's gives the phase ratio. Taking `np.angle()` converts to angles, and `np.cumsum()` along the time axis produces the absolute phase evolution relative to frame 0.
+`extract_temporal_phases()` computes frame-to-frame phase changes by multiplying the current frame's normalized coefficients by the conjugate of the previous frame's. Taking `np.angle()` converts to angles, and `np.cumsum()` along the time axis produces the absolute phase evolution relative to frame 0.
 
 ### Temporal Filtering
 
-`flattop_filter_1d()` applies a flat-top window (from `scipy.signal.windows.flattop`) as a low-pass smoothing kernel along the time axis. The window size is `width / 0.2327`, where 0.2327 is the flat-top window's equivalent noise bandwidth in bins. This filter separates the slow baseline motion from the fast detail motion we want to amplify.
+`flattop_filter_1d()` applies a flat-top window (from `scipy.signal.windows.flattop`) as a low-pass smoothing kernel along the time axis. The window length is `round(width / 0.2327)`, forced odd so the filter is zero-phase. 0.2327 is an empirical width-to-length factor carried over from the reference IDL implementation (it is not the window's equivalent noise bandwidth, which is about 3.77 bins). This filter separates the slow baseline motion from the faster detail motion we want to amplify.
 
-For windows larger than 32 samples, the filter switches to FFT-based convolution (`scipy.signal.fftconvolve`) for a ~4x speedup.
+In frequency terms, at 30 fps with the default `-w 80` the baseline filter (345 taps) has its half-amplitude point at about **0.20 Hz**, and the final smoothing filter (width 2, 9 taps) at about **8.6 Hz**. So motion between roughly 0.2 and 8.6 Hz is amplified. Both cutoffs scale with the frame rate, and the lower one scales inversely with `width`.
+
+For windows larger than 32 samples, the filter switches to FFT-based convolution (`scipy.signal.fftconvolve`) for a ~4x speedup. Both paths use the same boundary rule (the edge sample repeated, i.e. ndimage `reflect`), and a test checks that they agree to 1e-10.
 
 ### Phase Modification and Reconstruction
 
@@ -186,10 +188,10 @@ The `--gpu` flag enables GPU-accelerated processing via [PyTorch](https://pytorc
 Storing all DTCWT coefficients (amplitudes + phases) for every frame would require ~718 MB of CPU RAM per channel. The GPU path avoids this with a two-pass design:
 
 **Pass 1 — Forward DTCWT + Phase Extraction:**
-- Frames are sent to the GPU in batches (batch size auto-tuned to ~70% of available VRAM)
+- Frames are sent to the GPU in batches (batch size sized to ~70% of free VRAM; halved and retried on an out-of-memory error)
 - Forward DTCWT produces complex coefficients; only the **phase** is extracted and stored on CPU
 - Amplitudes and lowpass coefficients (Yl) are **discarded** — they will be recomputed in Pass 2
-- Cross-batch boundary handling carries the last frame's normalized coefficients to the next batch, ensuring bitwise-identical results to single-batch processing
+- Cross-batch boundary handling carries the last frame's normalized coefficients to the next batch, so batched results match single-batch processing to float32 precision (tested to 1e-5)
 
 **Temporal Filtering on GPU** (between passes):
 - Phase arrays are filtered using cuFFT (see below)
@@ -207,9 +209,9 @@ The temporal filter is the pipeline bottleneck (54% of CPU runtime). On GPU, it 
 2. Each chunk is transferred to GPU, FFT'd along the time axis, multiplied by the pre-computed FFT of the flat-top window, then inverse FFT'd
 3. The magnification and smoothing passes are applied on-GPU before transferring back
 
-**Chunk size auto-tuning:** queries `torch.cuda.mem_get_info()` and uses 70% of free VRAM as the limit, adapting to any GPU without user configuration.
+**Chunk size auto-tuning:** queries `torch.cuda.mem_get_info()` and sizes chunks to 50% of free VRAM (the DTCWT batches use 70%), adapting to any GPU without user configuration. A chunk that still runs out of memory is halved and retried.
 
-**Boundary handling:** The GPU path uses zero-padding (not reflect-padding like CPU) for FFT convolution. This produces ~1.3% relative error at the first and last few frames, which at 65+ dB PSNR is visually imperceptible.
+**Boundary handling:** Each chunk is padded along time on the CPU with the same rule as the CPU path before the FFT, so the GPU and CPU paths agree at the first and last frames too.
 
 ### Design Decisions
 
@@ -219,7 +221,7 @@ The temporal filter is the pipeline bottleneck (54% of CPU runtime). On GPU, it 
 | C=1 sequential vs C=3 batched | 3x C=1 sequential | C=3 only speeds DTCWT (22% of pipeline) by 2.2x but costs 2.5x VRAM; 1.2x total speedup not worth the complexity |
 | Float32 vs float64 | Float32 everywhere | PyTorch/CUDA standard; cumsum error max 2.4e-4 rad at 900 frames, 1000x below visibility threshold |
 | Whole-array vs chunked cuFFT | Chunked | Whole-array OOMs on consumer GPUs (>100 frames at 528x592); chunking is still 3x faster than CPU FFT |
-| Zero-pad vs reflect-pad (GPU FFT) | Zero-pad | Reflect-padding would increase memory; 1.3% boundary error at 65+ dB PSNR is visually imperceptible |
+| Padding for the GPU FFT | Same boundary rule as CPU, padded on CPU | Costs one extra half-window of frames per chunk; keeps the edges identical to the CPU path |
 
 See [`docs/design/gpu-acceleration.md`](docs/design/gpu-acceleration.md) for the full design document including alternatives considered and tradeoff analysis.
 
@@ -242,7 +244,7 @@ Benchmarked on face.mp4 (301 frames, 528x592, k=3, nlevels 8) with an RTX 4050 L
 
 **Memory check:** After loading the video, the tool prints its estimate of peak CPU RAM and warns if it exceeds the available memory (read from `/proc/meminfo` on Linux). CPU peak RAM grows linearly with frame count × resolution: roughly 33 bytes per pixel per frame (about 2.9 GiB for face.mp4).
 
-**Note:** CPU and GPU paths produce different outputs — they use different DTCWT implementations (`dtcwt` vs `pytorch_wavelets`). Both produce valid motion magnification results; they are not cross-comparable.
+**Note:** CPU and GPU paths use different DTCWT implementations (`dtcwt` vs `pytorch_wavelets`) with the same filters. A test checks they agree on a moving clip (PSNR >= 60 dB; measured about 115 dB), so outputs differ only at the float32 precision level.
 
 ---
 
@@ -270,7 +272,7 @@ pip install -r requirements.txt jupyter matplotlib
 jupyter notebook MotionMagDtcwt.ipynb
 ```
 
-**Requirements:** Python 3.8+
+**Requirements:** Python 3.10–3.12. `dtcwt` does not work with NumPy 2, so NumPy is capped below 2, and NumPy 1.x has no wheels for Python 3.13+. Tested with the exact versions in `requirements.lock` (Python 3.11) and `requirements-gpu.lock` (Python 3.10).
 
 ### C. Docker (CPU)
 
@@ -410,7 +412,7 @@ All tests run inside Docker — no local Python dependencies needed:
 
 ### Versioning
 
-Version is tracked in a `VERSION` file at the project root. `motion_mag.py` has `__version__` baked into the source (updated at release time).
+Version is tracked in a `VERSION` file at the project root. `motion_mag.py` has `__version__` baked into the source (updated at release time); a unit test fails if the two differ.
 
 **To cut a release:**
 1. Update `VERSION` with the new version number
@@ -442,12 +444,12 @@ scripts/
   make_golden.py           # Regenerates tests/data/golden_face.npz
 tests/
   test_motion_mag.py       # CPU unit tests
-  test_motion_mag_gpu.py   # GPU unit tests (CUDA-only, skip on CPU)
+  test_motion_mag_gpu.py   # GPU-path tests (CUDA, or CPU tensors with CPU PyTorch)
   data/golden_face.npz     # Golden regression data
 docs/design/               # Architecture decision records
   gpu-acceleration.md      # GPU design doc
   dtcwt-hardening.md       # Hardening design doc
-VERSION                    # Single source of truth for version
+VERSION                    # Release version (a test checks it matches __version__)
 CHANGELOG.md               # Release history
 CONTRIBUTING.md            # Contribution guidelines
 ```

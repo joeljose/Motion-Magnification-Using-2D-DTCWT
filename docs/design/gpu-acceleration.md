@@ -1,6 +1,12 @@
 # Design Doc: GPU-Accelerated DTCWT Motion Magnification
 
-**Status: APPROVED**
+**Status: APPROVED** (implemented in v2.0.0)
+
+> **Implementation notes (updated after the v2.0.0 audit, #21).** Where the shipped code differs from this plan:
+> - The temporal filter chunks use 50% of free VRAM (DTCWT batches use 70%), and each chunk is padded along time on the CPU with the same rule as the CPU path, so there is no boundary difference between the paths.
+> - Out-of-memory errors halve the batch or chunk size and retry, down to 1, before giving up with the suggestions from §F (#34).
+> - The memory estimate (§D) is printed after loading and warns when it exceeds available RAM; it no longer uses the formulas below (#26).
+> - CPU and GPU outputs agree to about 115 dB PSNR on a test clip, so they are comparable.
 
 ## Context
 
@@ -74,7 +80,7 @@ for each batch of B frames:
 
 After all batches: `np.cumsum(deltas, axis=0)` on CPU gives cumulative phase.
 
-**Key detail — cross-batch boundary**: The last frame's normalized coefficients are kept as a small GPU tensor (~7 MB for L0 at 528×592) and used as the reference for the first frame of the next batch. Verified: produces bitwise-identical results to single-batch processing.
+**Key detail — cross-batch boundary**: The last frame's normalized coefficients are kept as a small GPU tensor (~7 MB for L0 at 528×592) and used as the reference for the first frame of the next batch. Verified: matches single-batch processing to float32 precision (tested to 1e-5).
 
 **Why no amplitude storage**: Amplitudes are NOT stored during Pass 1. They are recomputed by re-running forward DTCWT in Pass 2. Verified: forward DTCWT is deterministic (0.00 diff between runs). This saves ~718 MB CPU RAM per channel.
 
@@ -103,9 +109,9 @@ for each level:
 
 **Why chunking is necessary**: cuFFT VRAM overhead is ~20× the array size (FFT buffers + complex intermediates). For face.mp4 at 301 frames, L0 phase array is 538 MB → needs ~3.8 GB for whole-array FFT, which OOMs on 6 GB GPUs. Chunking with 2 chunks uses ~3.9 GB peak and works.
 
-**Chunk size auto-tuning**: Query `torch.cuda.mem_get_info()` for free VRAM, divide by estimated per-coefficient FFT overhead (20× frame count × 4 bytes), use 70% of that as chunk size. This adapts to any GPU without user configuration.
+**Chunk size auto-tuning**: Query `torch.cuda.mem_get_info()` for free VRAM, divide by estimated per-coefficient FFT overhead (20× frame count × 4 bytes), use 50% of that as chunk size. This adapts to any GPU without user configuration.
 
-**Boundary handling**: cuFFT uses zero-padding, not reflect-padding. This produces ~1.3% relative error at video boundaries vs the CPU reflect-padded approach. At 65+ dB PSNR, this is visually imperceptible. The GPU path does NOT attempt to replicate reflect-padding (would require padding data before FFT, increasing memory usage).
+**Boundary handling**: each chunk is padded along time on the CPU before transfer, with the same boundary rule as the CPU path (the original plan used zero-padding and accepted ~1.3% error at the first and last frames).
 
 #### Pass 2: Coefficient Reconstruction + Inverse DTCWT
 
@@ -267,9 +273,9 @@ All GPU tests wrapped in `@pytest.mark.skipif(not torch.cuda.is_available())`.
 
 - **`pytorch_wavelets` is unmaintained** (last commit 2022). Uses only stable PyTorch APIs (`F.conv2d`, `autograd.Function`), but `pkg_resources` usage will break on Python 3.14+. Mitigation: pin PyTorch and numpy versions in Dockerfile; if it breaks, fork or rewrite (~400 lines using same `F.conv2d` approach).
 
-- **CPU and GPU outputs differ.** Different DTCWT implementations (dtcwt vs pytorch_wavelets), different precision (float64 vs float32). Both produce valid motion magnification; they are not cross-comparable. Documented, accepted.
+- **CPU and GPU outputs differ slightly.** Different DTCWT implementations (dtcwt vs pytorch_wavelets) with the same filters; a test measures about 115 dB PSNR between them on a moving clip.
 
-- **cuFFT boundary handling differs from CPU.** GPU uses zero-padding, CPU uses reflect-padding for the temporal filter. ~1.3% relative error at video boundaries, 65+ dB PSNR. Visually imperceptible.
+- **cuFFT boundary handling.** Resolved: both paths pad the same way.
 
 - **Default filter change is breaking.** Switching from `near_sym_a` to `near_sym_b` changes output for all users. Justified by visible quality improvement; old behavior restorable via `--biort near_sym_a --qshift qshift_a`.
 
