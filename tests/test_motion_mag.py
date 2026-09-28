@@ -515,6 +515,16 @@ class TestInputValidation:
         assert code == 1
         assert "requires PyTorch" in stderr
 
+    def test_invalid_device(self, tiny_video):
+        torch = pytest.importorskip("torch")
+        pytest.importorskip("pytorch_wavelets")
+        if not torch.cuda.is_available():
+            pytest.skip("no CUDA GPU")
+        code, stderr = run_cli("-i", tiny_video, "--gpu", "--device", "99")
+        assert code == 1
+        assert "--device 99 is not a valid CUDA device" in stderr
+        assert "Traceback" not in stderr
+
     def test_corrupt_input_file(self, dummy_video):
         code, stderr = run_cli("-i", dummy_video)
         assert code == 1

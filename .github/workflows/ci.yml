@@ -47,3 +47,24 @@ jobs:
             -v "${{ github.workspace }}:/data" \
             dtcwt-ci \
             python /data/scripts/verify_output.py /data/face.mp4 /data/face_magnified.avi
+
+  gpu-code-on-cpu:
+    # Runs the GPU code path (tests/test_motion_mag_gpu.py) on CPU tensors
+    # with the CPU build of PyTorch, since hosted runners have no GPU.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies (CPU PyTorch)
+        run: |
+          pip install --require-hashes -r requirements-gpu.lock
+          pip install torch==2.1.2 --index-url https://download.pytorch.org/whl/cpu
+          # Same commit as PYTORCH_WAVELETS_SHA in Dockerfile.gpu
+          pip install --no-deps "pytorch_wavelets @ git+https://github.com/fbcotter/pytorch_wavelets.git@9a0c507f04f43c5397e384bb6be8340169b2fd9a"
+
+      - name: GPU-path tests on CPU
+        run: python -m pytest tests/test_motion_mag_gpu.py -q
