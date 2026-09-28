@@ -402,17 +402,13 @@ def save_video(channels, fps, path, frame_size):
         raise RuntimeError(f"could not open video writer for {path} "
                            f"(codec MJPG, fps {fps})")
     try:
-        frame_count = channels[0].shape[0]
-        result = np.empty(
-            (frame_count, channels[0].shape[1], channels[0].shape[2], 3),
-            dtype=np.uint8
-        )
-        result[:, :, :, 2] = np.nan_to_num(np.clip(np.rint(channels[0]), 0, 255)).astype(np.uint8)
-        result[:, :, :, 1] = np.nan_to_num(np.clip(np.rint(channels[1]), 0, 255)).astype(np.uint8)
-        result[:, :, :, 0] = np.nan_to_num(np.clip(np.rint(channels[2]), 0, 255)).astype(np.uint8)
-
-        for i in range(frame_count):
-            writer.write(result[i])
+        # One BGR frame at a time, so no second full copy of the video
+        frame = np.empty(channels[0].shape[1:] + (3,), dtype=np.uint8)
+        for i in range(channels[0].shape[0]):
+            for bgr_index, channel in zip((2, 1, 0), channels):
+                frame[:, :, bgr_index] = np.nan_to_num(
+                    np.clip(np.rint(channel[i]), 0, 255))
+            writer.write(frame)
     finally:
         writer.release()
     if not os.path.isfile(path) or os.path.getsize(path) == 0:
@@ -1233,6 +1229,9 @@ def main():
     out_dir = os.path.dirname(os.path.abspath(args.output))
     if not os.path.isdir(out_dir):
         print(f"Error: output directory does not exist: {out_dir}", file=sys.stderr)
+        sys.exit(1)
+    if not os.access(out_dir, os.W_OK):
+        print(f"Error: output directory is not writable: {out_dir}", file=sys.stderr)
         sys.exit(1)
 
     # --- Load video ---

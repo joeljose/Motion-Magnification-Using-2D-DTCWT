@@ -543,6 +543,27 @@ class TestSaveVideo:
             motion_mag.save_video(channels, 30.0, str(path), (8, 8))
         assert (written["f"] == 100).all()
 
+    def test_frames_written_in_order_with_nan_and_clipping(self, tmp_path):
+        """Channels are written frame by frame as BGR; NaN becomes 0 and values
+        are rounded and clipped."""
+        n = 4
+        r = np.stack([np.full((8, 8), 10.0 * i + 0.6) for i in range(n)])
+        g = np.full((n, 8, 8), 300.0)
+        b = np.full((n, 8, 8), np.nan)
+        written = []
+        mock_writer = MagicMock()
+        mock_writer.isOpened.return_value = True
+        mock_writer.write.side_effect = lambda frame: written.append(frame.copy())
+        path = tmp_path / "o.avi"
+        path.write_bytes(b"x")
+        with patch("cv2.VideoWriter", return_value=mock_writer):
+            motion_mag.save_video([r, g, b], 30.0, str(path), (8, 8))
+        assert len(written) == n
+        for i, frame in enumerate(written):
+            assert (frame[:, :, 2] == 10 * i + 1).all()  # R, rounded
+            assert (frame[:, :, 1] == 255).all()           # G, clipped
+            assert (frame[:, :, 0] == 0).all()             # B, NaN -> 0
+
     def test_writes_readable_file(self, tmp_path):
         channels = [np.full((3, 16, 16), 100.0) for _ in range(3)]
         path = str(tmp_path / "o.avi")
@@ -692,6 +713,19 @@ class TestInputValidation:
         assert code == 1
         assert "output directory does not exist" in stderr
         assert "Traceback" not in stderr
+
+    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                        reason="root can write to read-only directories")
+    def test_read_only_output_directory(self, dummy_video, tmp_path):
+        out_dir = tmp_path / "ro"
+        out_dir.mkdir()
+        out_dir.chmod(0o500)
+        try:
+            code, stderr = run_cli("-i", dummy_video, "-o", str(out_dir / "out.avi"))
+        finally:
+            out_dir.chmod(0o700)
+        assert code == 1
+        assert "output directory is not writable" in stderr
 
     def test_magnification_zero(self, dummy_video):
         code, stderr = run_cli("-i", dummy_video, "-k", "0")
