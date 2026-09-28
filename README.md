@@ -257,9 +257,9 @@ Benchmarked on face.mp4 (301 frames, 528x592, k=3, nlevels 8) with an RTX 4050 L
 | Metric | CPU | GPU |
 |---|---|---|
 | Per-channel speedup | — | ~5-17x |
-| End-to-end time | ~56 s (`--jobs 2`, default; 88 s with `--jobs 1`) | ~24 sec |
+| End-to-end time | ~60 s (`--jobs 2`, default; 84 s with `--jobs 1`) | ~24 sec |
 | Precision | float32 / complex64 | float32 |
-| Peak RAM | 2.3 GiB | 2.8 GiB |
+| Peak RAM | 2.5 GiB | 2.8 GiB |
 | Peak VRAM | — | ~2-3 GB |
 
 **Hardware requirements (GPU path):**
@@ -267,7 +267,7 @@ Benchmarked on face.mp4 (301 frames, 528x592, k=3, nlevels 8) with an RTX 4050 L
 - Minimum ~4 GB VRAM recommended (auto-tuning adapts batch/chunk sizes)
 - [`nvidia-container-toolkit`](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) for Docker GPU support
 
-**Memory check:** After loading the video, the tool prints its estimate of peak CPU RAM and warns if it exceeds the available memory (read from `/proc/meminfo` on Linux). CPU peak RAM grows linearly with frame count × resolution: roughly 26 bytes per pixel per frame (about 2.3 GiB for face.mp4), plus about 130 MiB per extra `--jobs` worker.
+**Memory check:** After loading the video, the tool prints its estimate of peak CPU RAM and warns if it exceeds the available memory (read from `/proc/meminfo` on Linux). CPU peak RAM grows linearly with frame count × resolution: roughly 28 bytes per pixel per frame (about 2.5 GiB for face.mp4), plus about 130 MiB per extra `--jobs` worker.
 
 **Note:** CPU and GPU paths use different DTCWT implementations (`dtcwt` vs `pytorch_wavelets`) with the same filters. A test checks they agree on a moving clip (PSNR >= 60 dB; measured about 115 dB), so outputs differ only at the float32 precision level.
 
@@ -375,6 +375,8 @@ python motion_mag.py -i face.mp4 --gpu -k 5 --biort near_sym_a --qshift qshift_a
 
 Other names are rejected when the arguments are parsed.
 
+**Using `motion_mag` from your own script:** with `jobs` > 1 (the default), `magnify_motions` starts worker processes with the `forkserver` start method (`spawn` where that isn't available), which re-imports your main script in each worker. Put your script's top-level code under `if __name__ == "__main__":`, as with any `multiprocessing` code, or pass `jobs=1`. Notebooks need nothing extra.
+
 ### Notebook
 
 Open the notebook and run all cells. It calls `motion_mag.py` (cloning the repository first when run on Colab), magnifies the bundled `face.mp4`, saves `face_k3.avi`, and plots a before/after comparison. To use your own video, change the `filename` variable.
@@ -384,7 +386,7 @@ Open the notebook and run all cells. It calls `motion_mag.py` (cloning the repos
 - Start with low magnification (k=3) and increase gradually.
 - Prefer `--freq-low`/`--freq-high` around the motion you care about (see Applications): a narrow band amplifies less noise than the default ~0.2–8.6 Hz. With `-w`, a larger width lowers the band's lower edge.
 - Fewer `nlevels` → faster processing but less spatial detail captured.
-- By default R, G and B are magnified independently, so at higher `k` their phases drift apart and colour fringes appear. `--color-space yiq` magnifies only the luma (Y of YIQ) and keeps the colour (I, Q) of the input. It runs about 3.4x faster on the CPU (face.mp4 at k=5: 16 s instead of 56 s) and removes the fringing:
+- By default R, G and B are magnified independently, so at higher `k` their phases drift apart and colour fringes appear. `--color-space yiq` magnifies only the luma (Y of YIQ) and keeps the colour (I, Q) of the input. It runs about 3.4x faster on the CPU (face.mp4 at k=5: 16 s instead of 56–60 s) and removes the fringing:
 
   ![Input vs k=5 in rgb and yiq mode](.github/images/luma_vs_rgb.png)
 

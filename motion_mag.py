@@ -15,10 +15,11 @@ steerable pyramids.
 __version__ = "2.0.0"
 
 import argparse
-import mmap
+import functools
 import multiprocessing
 import os
 import sys
+import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
@@ -791,50 +792,102 @@ def magnify_motions_gpu(data, magnification=3.0, width=80, nlevels=8,
 _PHASE_CHUNK = 10000
 
 
-def _shared_empty(shape, dtype):
-    """An array in anonymous shared memory, visible to forked workers."""
-    nbytes = max(1, int(np.prod(shape)) * np.dtype(dtype).itemsize)
-    return np.ndarray(shape, dtype, buffer=mmap.mmap(-1, nbytes))
+class _SharedArrays:
+    """Arrays for one magnify_motions call that worker processes can open.
+
+    Each array is a file that workers memory-map by path, so nothing large
+    is pickled and no module-level state is shared between calls. On Linux
+    the files are anonymous in-memory files (memfd_create), opened by
+    workers through /proc/<pid>/fd; unlike /dev/shm they aren't limited by
+    Docker's 64 MB default. Elsewhere they are temporary files. close()
+    releases them.
+    """
+
+    def __init__(self):
+        self.fds, self.paths = [], []
+
+    def empty(self, shape, dtype):
+        proc_fd = f'/proc/{os.getpid()}/fd'
+        if hasattr(os, 'memfd_create') and os.path.isdir(proc_fd):
+            fd = os.memfd_create('motion_mag')
+            self.fds.append(fd)
+            path = f'{proc_fd}/{fd}'
+        else:
+            fd, path = tempfile.mkstemp(prefix='motion_mag_', suffix='.npy')
+            os.close(fd)
+            self.paths.append(path)
+        array = np.lib.format.open_memmap(path, mode='w+', dtype=dtype, shape=shape)
+        return array, path
+
+    def close(self):
+        for fd in self.fds:
+            os.close(fd)
+        for path in self.paths:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        self.fds, self.paths = [], []
 
 
-# State shared with forked worker processes (set before the pool forks)
-_POOL = {}
+def _open_shared(path):
+    return np.load(path, mmap_mode='r+')
 
 
+@functools.lru_cache(maxsize=None)
 def _transform(biort, qshift):
-    key = (biort, qshift)
-    if key not in _POOL.setdefault('transforms', {}):
-        _POOL['transforms'][key] = dtcwt.Transform2d(biort=biort, qshift=qshift)
-    return _POOL['transforms'][key]
+    return dtcwt.Transform2d(biort=biort, qshift=qshift)
 
 
-def _forward_block(start, end):
-    """Forward DTCWT of frames [start, end) into the shared level arrays."""
-    st = _POOL['state']
-    transform = _transform(st['biort'], st['qshift'])
+def _forward_block(spec, start, end):
+    """Forward DTCWT of frames [start, end) into the shared level arrays.
+
+    `spec` holds the arrays themselves (serial) or their file paths (worker).
+    """
+    data = spec['data'] if spec['in_process'] else _open_shared(spec['data'])
+    lowpass = spec['lowpass'] if spec['in_process'] else _open_shared(spec['lowpass'])
+    highpasses = (spec['highpasses'] if spec['in_process']
+                  else [_open_shared(p) for p in spec['highpasses']])
+    transform = _transform(spec['biort'], spec['qshift'])
     for i in range(start, end):
-        pyramid = transform.forward(st['data'][i], nlevels=st['nlevels'])
-        st['lowpass'][i] = pyramid.lowpass
+        pyramid = transform.forward(data[i], nlevels=spec['nlevels'])
+        lowpass[i] = pyramid.lowpass
         for level, hp in enumerate(pyramid.highpasses):
-            st['highpasses'][level][i] = hp
+            highpasses[level][i] = hp
     return end - start
 
 
-def _inverse_block(start, end):
+def _inverse_block(spec, start, end):
     """Inverse DTCWT of frames [start, end) into the shared result array."""
-    st = _POOL['state']
-    transform = _transform(st['biort'], st['qshift'])
-    h, w = st['result'].shape[1:]
+    lowpass = spec['lowpass'] if spec['in_process'] else _open_shared(spec['lowpass'])
+    highpasses = (spec['highpasses'] if spec['in_process']
+                  else [_open_shared(p) for p in spec['highpasses']])
+    result = spec['result'] if spec['in_process'] else _open_shared(spec['result'])
+    transform = _transform(spec['biort'], spec['qshift'])
+    h, w = result.shape[1:]
     for i in range(start, end):
-        pyramid = dtcwt.Pyramid(st['lowpass'][i],
-                                tuple(hp[i] for hp in st['highpasses']))
+        pyramid = dtcwt.Pyramid(lowpass[i], tuple(hp[i] for hp in highpasses))
         # dtcwt pads odd sizes by one row/column; crop back to the input size
-        st['result'][i] = transform.inverse(pyramid)[:h, :w]
+        result[i] = transform.inverse(pyramid)[:h, :w]
     return end - start
 
 
-def _run_frame_blocks(func, num_frames, jobs, label):
-    """Run func(start, end) over frame blocks, in forked processes if jobs > 1."""
+def _mp_context():
+    """Process start method that is safe when threads are running: forkserver
+    where available (Linux, macOS), else spawn. Plain fork can deadlock a
+    child if another thread (OpenCV, BLAS, FFT) held a lock at fork time."""
+    if 'forkserver' not in multiprocessing.get_all_start_methods():
+        return multiprocessing.get_context('spawn')
+    ctx = multiprocessing.get_context('forkserver')
+    # The fork server imports these once; workers forked from it share the
+    # pages instead of each importing its own copy (faster start, less RAM)
+    ctx.set_forkserver_preload(['numpy', 'scipy.fft', 'scipy.ndimage', 'dtcwt', 'cv2'])
+    return ctx
+
+
+def _run_frame_blocks(func, spec, num_frames, pool, label):
+    """Run func(spec, start, end) over frame blocks, in `pool` if given."""
+    jobs = pool._max_workers if pool is not None else 1
     blocks = max(1, min(num_frames, jobs * 4))
     bounds = np.linspace(0, num_frames, blocks + 1).astype(int)
     tasks = [(a, b) for a, b in zip(bounds[:-1], bounds[1:]) if b > a]
@@ -850,13 +903,12 @@ def _run_frame_blocks(func, num_frames, jobs, label):
                   f"({pct:.0%}) — {format_duration(eta)} remaining")
             next_report = pct + 0.1
 
-    if jobs == 1:
+    if pool is None:
         for a, b in tasks:
-            report(func(a, b))
+            report(func(spec, a, b))
         return
-    with ProcessPoolExecutor(jobs, mp_context=multiprocessing.get_context('fork')) as pool:
-        for future in as_completed([pool.submit(func, a, b) for a, b in tasks]):
-            report(future.result())
+    for future in as_completed([pool.submit(func, spec, a, b) for a, b in tasks]):
+        report(future.result())
 
 
 # Default worker count. The dtcwt transforms are memory-bound: on a 6-core
@@ -867,9 +919,7 @@ _DEFAULT_JOBS = 2
 
 
 def _default_jobs(jobs):
-    """Worker count: `jobs`, else _DEFAULT_JOBS; 1 where fork is unavailable."""
-    if 'fork' not in multiprocessing.get_all_start_methods():
-        return 1
+    """Worker count: `jobs`, else _DEFAULT_JOBS, capped at the CPU count."""
     return max(1, min(jobs or _DEFAULT_JOBS, os.cpu_count() or 1))
 
 
@@ -922,22 +972,36 @@ def magnify_motions(data, magnification=3.0, width=80, nlevels=8,
     num_frames, h, w = data.shape
     probe = _transform(biort, qshift).forward(np.zeros((h, w)), nlevels=nlevels)
 
-    # Shared arrays: input frames, lowpass and one complex64 array per level
-    shared_data = _shared_empty(data.shape, data.dtype)
-    shared_data[:] = data
-    state = {
-        'data': shared_data, 'biort': biort, 'qshift': qshift, 'nlevels': nlevels,
-        'lowpass': _shared_empty((num_frames,) + probe.lowpass.shape, np.float64),
-        'highpasses': [_shared_empty((num_frames,) + hp.shape, np.complex64)
-                       for hp in probe.highpasses],
-    }
-    _POOL['state'] = state
+    # Input frames, lowpass and one complex64 array per level. With workers
+    # they live in memory-mapped files that each worker opens by path.
+    shared = _SharedArrays() if jobs > 1 else None
+
+    def empty(shape, dtype):
+        if shared is None:
+            return np.empty(shape, dtype), None
+        return shared.empty(shape, dtype)
+
+    data_arr, data_path = empty(data.shape, data.dtype)
+    data_arr[:] = data
+    lowpass, lowpass_path = empty((num_frames,) + probe.lowpass.shape, np.float64)
+    levels = [empty((num_frames,) + hp.shape, np.complex64) for hp in probe.highpasses]
+    highpasses = [arr for arr, _ in levels]
+    result, result_path = empty(data.shape, np.float32)
+    common = {'biort': biort, 'qshift': qshift, 'nlevels': nlevels,
+              'in_process': shared is None}
+    if shared is None:
+        spec = dict(common, data=data_arr, lowpass=lowpass, highpasses=highpasses,
+                    result=result)
+    else:
+        spec = dict(common, data=data_path, lowpass=lowpass_path,
+                    highpasses=[path for _, path in levels], result=result_path)
+    del levels
+    pool = ProcessPoolExecutor(jobs, mp_context=_mp_context()) if jobs > 1 else None
     try:
         # Step 1: Forward DTCWT
         print(f"  Forward DTCWT ({jobs} {'job' if jobs == 1 else 'jobs'})...")
-        _run_frame_blocks(_forward_block, num_frames, jobs, "forward")
-        state['data'] = None
-        del shared_data
+        _run_frame_blocks(_forward_block, spec, num_frames, pool, "forward")
+        del data_arr
 
         # Steps 2–5 per level, in threads over column chunks; the
         # reconstructed coefficients overwrite the originals in place
@@ -990,7 +1054,7 @@ def magnify_motions(data, magnification=3.0, width=80, nlevels=8,
             finish(chunk, temporal_phase(chunk), details[:, cols])
 
         with ThreadPoolExecutor(jobs) as threads:
-            for level, hp in enumerate(state['highpasses']):
+            for level, hp in enumerate(highpasses):
                 print(f"    Level {level + 1}/{nlevels}")
                 coeffs = hp.reshape(num_frames, -1)
                 starts = range(0, coeffs.shape[1], _PHASE_CHUNK)
@@ -1006,11 +1070,16 @@ def magnify_motions(data, magnification=3.0, width=80, nlevels=8,
 
         # Step 6: Inverse DTCWT
         print("  Inverse DTCWT...")
-        state['result'] = _shared_empty(data.shape, np.float32)
-        _run_frame_blocks(_inverse_block, num_frames, jobs, "inverse")
-        return state['result']
+        _run_frame_blocks(_inverse_block, spec, num_frames, pool, "inverse")
+        del lowpass, highpasses, spec
+        # A plain ndarray view of the mapping: no copy, and the memory stays
+        # valid after close() releases the file descriptors / temp files
+        return result.view(np.ndarray)
     finally:
-        _POOL.pop('state', None)
+        if pool is not None:
+            pool.shutdown()
+        if shared is not None:
+            shared.close()
 
 
 def _to_uint8(x):

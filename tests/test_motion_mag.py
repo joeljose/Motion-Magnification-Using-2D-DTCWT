@@ -428,6 +428,45 @@ class TestParallelJobs:
             parallel = motion_mag.magnify_motions(data, jobs=3, **kwargs)
         np.testing.assert_array_equal(parallel, serial)
 
+    def test_concurrent_calls_do_not_interfere(self):
+        """Two calls running at once in one process (threads) must each get
+        their own result: workers get their state per call, not from module
+        globals."""
+        from concurrent.futures import ThreadPoolExecutor
+        rng = np.random.RandomState(1)
+        clips = [(rng.rand(10, 32, 32) * 255).astype(np.uint8) for _ in range(2)]
+        kwargs = dict(magnification=3.0, width=5, nlevels=2)
+        expected = [motion_mag.magnify_motions(c, jobs=1, **kwargs) for c in clips]
+        with ThreadPoolExecutor(2) as pool:
+            results = list(pool.map(
+                lambda c: motion_mag.magnify_motions(c, jobs=2, **kwargs), clips))
+        for got, want in zip(results, expected):
+            np.testing.assert_array_equal(got, want)
+
+    def test_workers_do_not_use_plain_fork(self):
+        assert motion_mag._mp_context().get_start_method() in ("forkserver", "spawn")
+
+    @pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="Linux only")
+    def test_shared_memory_is_released(self):
+        def memfds():
+            fds = []
+            for fd in os.listdir("/proc/self/fd"):
+                try:
+                    if "motion_mag" in os.readlink(f"/proc/self/fd/{fd}"):
+                        fds.append(fd)
+                except OSError:
+                    pass
+            return fds
+        data = (np.random.RandomState(0).rand(8, 32, 32) * 255).astype(np.uint8)
+        result = motion_mag.magnify_motions(data, width=3, nlevels=2, jobs=2)
+        assert type(result) is np.ndarray and np.isfinite(result).all()
+        # only the returned result's mapping remains, and it goes with it
+        assert len(memfds()) <= 1
+        del result
+        import gc
+        gc.collect()
+        assert memfds() == []
+
     def test_default_jobs(self):
         assert motion_mag._default_jobs(None) == min(motion_mag._DEFAULT_JOBS, os.cpu_count())
         assert motion_mag._default_jobs(1) == 1
