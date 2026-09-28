@@ -20,7 +20,7 @@ RUN pip install --no-cache-dir --require-hashes -r requirements-gpu.lock && \
     pip install --no-cache-dir --no-deps \
         "pytorch_wavelets @ git+https://github.com/fbcotter/pytorch_wavelets.git@${PYTORCH_WAVELETS_SHA}"
 
-COPY motion_mag.py .
+COPY motion_mag.py VERSION ./
 COPY tests/ tests/
 COPY scripts/ scripts/
 

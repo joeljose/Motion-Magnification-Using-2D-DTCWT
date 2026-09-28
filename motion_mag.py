@@ -116,12 +116,14 @@ _NP_PAD_MODE = {'reflect': 'symmetric', 'mirror': 'reflect', 'nearest': 'edge',
 def flattop_filter_1d(data, width, axis=0, mode='reflect'):
     """Apply a flat-top window low-pass filter along the specified axis.
 
-    Uses a flat-top window (scipy.signal.flattop) as a smoothing kernel.
-    The window size is determined by width / 0.2327, where 0.2327 is the
-    flat-top window's equivalent noise bandwidth in bins.
+    Uses a flat-top window (scipy.signal.windows.flattop) as a smoothing
+    kernel. The window length is round(width / 0.2327), forced odd; 0.2327
+    is an empirical width-to-length factor from the reference IDL
+    implementation, not the window's equivalent noise bandwidth (~3.77 bins).
+    At 30 fps, width 80 gives a half-amplitude cutoff of about 0.20 Hz.
 
-    For large windows (>32 samples), uses FFT-based convolution with
-    reflect-padded boundaries for ~4x speedup. For small windows, uses
+    For large windows (>32 samples), uses FFT-based convolution with the
+    same boundary padding as ndimage, for ~4x speedup. For small windows, uses
     direct convolution which is faster due to lower overhead.
 
     Args:

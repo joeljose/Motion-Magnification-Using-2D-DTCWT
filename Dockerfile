@@ -10,7 +10,7 @@ WORKDIR /app
 COPY requirements.lock pyproject.toml ./
 RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 
-COPY motion_mag.py .
+COPY motion_mag.py VERSION ./
 COPY tests/ tests/
 COPY scripts/ scripts/
 

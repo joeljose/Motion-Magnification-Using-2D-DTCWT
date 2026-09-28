@@ -115,19 +115,14 @@ class TestGpuTemporalFilter:
                                         device=device)
         assert np.all(np.isfinite(phases[0]))
 
-    def test_dc_signal_preserved_in_interior(self):
-        """A constant phase should be preserved away from boundaries.
-
-        cuFFT uses zero-padding (not reflect), so boundary frames are affected.
-        Interior frames should still be close to the original DC value.
-        """
+    def test_dc_signal_preserved(self):
+        """A constant phase must pass unchanged, boundary frames included
+        (each chunk is padded along time before the FFT, like the CPU path)."""
         phases = [np.ones((50, 100), dtype=np.float32) * 2.5]
-        device = DEVICE
         motion_mag._gpu_temporal_filter(phases, magnification=3.0, width=5.0,
-                                        device=device)
-        # Check interior frames (skip boundary region)
-        interior = phases[0][15:35, :]
-        np.testing.assert_allclose(interior, 2.5, atol=0.1)
+                                        device=DEVICE)
+        # float32 FFT level (CUDA measured 4e-4); zero-padding gave ~0.03 at the ends
+        np.testing.assert_allclose(phases[0], 2.5, atol=2e-3)
 
 
 class TestGpuInversePass:
