@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Documentation
 - `docs/theory.md`: a tutorial on the method from first principles, with figures generated from the pipeline code (`scripts/make_theory_figures.py`), measured per-level limits, a comparison with other approaches and a glossary. README: "How to learn this" path, corrected pipeline diagram (conjugate multiply, band and luma modes), and unsourced claims (10–100x, ~21x, ~5x) replaced (#74)
+- The notebook is now a guided walk-through that mirrors `docs/theory.md`, with small experiments (sub-bands, phase vs shift, phase over time, filter gain, the full run, the displacement limit). Equations in `docs/theory.md` and the notebook use LaTeX math, which GitHub, Jupyter and Colab render (#76)
 
 ## [3.0.0] - 2026-09-28
 
