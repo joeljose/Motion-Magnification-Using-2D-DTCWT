@@ -13,45 +13,49 @@ A tutorial for readers who want to understand the method, not just run it. It st
 
 ## 1. What "magnifying motion" means
 
-Suppose a point in the scene moves by a tiny displacement δ(t): a skin surface moving with the pulse, a building swaying, a pipe vibrating. The displacement is well under a pixel, so the video looks still. Motion magnification produces a new video in which the same point moves by k·δ(t) for a chosen factor k, while the rest of the picture (texture, colour, lighting) stays as it was.
+Suppose a point in the scene moves by a tiny displacement $\delta(t)$: a skin surface moving with the pulse, a building swaying, a pipe vibrating. The displacement is well under a pixel, so the video looks still. Motion magnification produces a new video in which the same point moves by $k\delta(t)$ for a chosen factor $k$, while the rest of the picture (texture, colour, lighting) stays as it was.
 
 Two things make this hard. We never measure δ directly: all we have are pixel values. And we usually want to magnify only some motions, such as the pulse, and not others, such as slow drift or sensor noise.
 
 ## 2. Two families of methods
 
-**Eulerian magnification** (Wu et al. 2012) looks at each pixel's intensity over time. For a 1D image I(x) moving by δ(t), a first-order Taylor expansion gives
+**Eulerian magnification** (Wu et al. 2012) looks at each pixel's intensity over time. For a 1D image $I(x)$ moving by $\delta(t)$, a first-order Taylor expansion gives
 
-  I(x + δ(t)) ≈ I(x) + δ(t) · ∂I/∂x.
+$$I(x + \delta(t)) \approx I(x) + \delta(t)\frac{\partial I}{\partial x}.$$
 
-The temporal change at a pixel is therefore proportional to the motion. Band-passing that change in time and adding it back α times gives I(x) + (1 + α)·δ(t)·∂I/∂x, which is approximately the image moved by (1 + α)·δ(t). The approximation only holds while the magnified motion is small compared with the image structure; Wu et al. give the bound (1 + α)·δ(t) < λ/8 for a sinusoid of wavelength λ. It also amplifies intensity noise by the same factor as the motion. The sibling repository [Eulerian-Video-Magnification](https://github.com/joeljose/Eulerian-Video-Magnification) implements this method.
+The temporal change at a pixel is therefore proportional to the motion. Band-passing that change in time and adding it back $\alpha$ times gives $I(x) + (1 + \alpha)\delta(t)\partial I/\partial x$, which is approximately the image moved by $(1 + \alpha)\delta(t)$. The approximation only holds while the magnified motion is small compared with the image structure; Wu et al. give the bound $(1 + \alpha)\delta(t) \lt  \lambda/8$ for a sinusoid of wavelength $\lambda$. It also amplifies intensity noise by the same factor as the motion. The sibling repository [Eulerian-Video-Magnification](https://github.com/joeljose/Eulerian-Video-Magnification) implements this method.
 
 **Phase-based magnification** (Wadhwa et al. 2013) does not approximate the image with its derivative. It decomposes each frame into localised, oriented, complex-valued sub-bands whose *phase* encodes position directly, and multiplies the change of phase. Because the motion is represented exactly within each sub-band, the method tolerates larger magnification and amplifies noise less; Wadhwa et al. report that it supports roughly four times larger magnification than the linear Eulerian method before artefacts appear. They used complex steerable pyramids; this repository follows Anfinogentov & Nakariakov (2016), who used the dual-tree complex wavelet transform (DTCWT) instead.
 
 ## 3. Local phase encodes position
 
-Take a 1D pattern that is locally a sinusoid of angular frequency ω:
+Take a 1D pattern that is locally a sinusoid of angular frequency $\omega$:
 
-  I(x) = A · cos(ωx + φ).
+$$I(x) = A\cos(\omega x + \phi).$$
 
-Shift it right by δ:
+Shift it right by $\delta$:
 
-  I(x − δ) = A · cos(ωx + φ − ωδ).
+$$I(x - \delta) = A\cos(\omega x + \phi - \omega\delta).$$
 
-The amplitude A is unchanged and the phase drops by exactly ω·δ. The same holds for any image once it is split into band-pass pieces: each piece is dominated by frequencies near its centre frequency ω, and a small shift changes its phase by about ω·δ.
+The amplitude $A$ is unchanged and the phase drops by exactly $\omega\delta$. The same holds for any image once it is split into band-pass pieces: each piece is dominated by frequencies near its centre frequency $\omega$, and a small shift changes its phase by about $\omega\delta$.
 
-To read the phase we need a *complex* filter: a real filter such as a cosine gives A·cos(…), where amplitude and phase are mixed together, while a filter whose real and imaginary parts form a quadrature pair (a cosine-like and a sine-like wavelet) gives A·e^{i(…)}, from which amplitude and phase separate cleanly. Using wavelets instead of global sinusoids makes this *local phase*: each coefficient describes one small region at one scale and orientation. Fleet & Jepson (1990) showed that local phase is a robust carrier of image motion.
+To read the phase we need a *complex* filter: a real filter such as a cosine gives $A\cos(\dots)$, where amplitude and phase are mixed together, while a filter whose real and imaginary parts form a quadrature pair (a cosine-like and a sine-like wavelet) gives $Ae^{i(\dots)}$, from which amplitude and phase separate cleanly. Using wavelets instead of global sinusoids makes this *local phase*: each coefficient describes one small region at one scale and orientation. Fleet & Jepson (1990) showed that local phase is a robust carrier of image motion.
 
-**Magnifying the phase magnifies the motion.** If a coefficient's phase changed by Δφ = −ω·δ because the image moved by δ, then replacing Δφ with k·Δφ is equivalent to moving it by k·δ. No derivative, no Taylor series: within one sub-band the shift is exact.
+**Magnifying the phase magnifies the motion.** If a coefficient's phase changed by $\Delta\phi = -\omega\delta$ because the image moved by $\delta$, then replacing $\Delta\phi$ with $k\Delta\phi$ is equivalent to moving it by $k\delta$. No derivative, no Taylor series: within one sub-band the shift is exact.
 
-**The limit is the wavelength.** Phase is only known modulo 2π. Once the magnified phase change k·ω·δ passes ±π, it wraps around and the coefficient describes a shift in the *opposite* direction. The magnified displacement at each scale must therefore stay below half the scale's wavelength, λ/2 = π/ω, and in practice well below it.
+**The limit is the wavelength.** Phase is only known modulo $2\pi$. Once the magnified phase change $k\omega\delta$ passes $\pm\pi$, it wraps around and the coefficient describes a shift in the *opposite* direction. The magnified displacement at each scale must therefore stay below half the scale's wavelength,
 
-The figure shows this on a real image: a crop of face.mp4 is shifted sub-pixel by sub-pixel, and the amplitude-weighted phase change of each DTCWT level is plotted. Each level is linear near zero with its own slope ω, and the finest levels wrap first.
+$$k\delta \lt  \frac{\lambda}{2} = \frac{\pi}{\omega},$$
+
+and in practice well below it.
+
+The figure shows this on a real image: a crop of face.mp4 is shifted sub-pixel by sub-pixel, and the amplitude-weighted phase change of each DTCWT level is plotted. Each level is linear near zero with its own slope $\omega$, and the finest levels wrap first.
 
 ![Phase change of each DTCWT level as the image shifts: linear with slope ω near zero, wrapping at ±π, finest levels first](images/theory/phase_vs_shift.png)
 
 Measured on that crop (nlevels 5):
 
-| Level | Phase slope ω (rad/px) | Effective wavelength 2π/ω | Shift for a quarter turn (π/2) | Shift for a half turn (π) |
+| Level | Phase slope $\omega$ (rad/px) | Effective wavelength $2\pi/\omega$ | Shift for a quarter turn ($\pi/2$) | Shift for a half turn ($\pi$) |
 |---|---|---|---|---|
 | 1 | 1.53 | 4.1 px | 1.0 px | 2.1 px |
 | 2 | 1.05 | 6.0 px | 1.5 px | 3.0 px |
@@ -96,11 +100,11 @@ Each level halves the resolution in both directions: for an H×W frame, level l 
 
 For every coefficient we need its phase φ(t) in every frame, as a continuous curve rather than values wrapped into (−π, π]. The pipeline:
 
-1. normalises each coefficient to unit length, u(t) = C(t)/|C(t)|, keeping only the phase;
-2. takes the frame-to-frame change with a conjugate product, Δφ(t) = angle(u(t) · conj(u(t−1))); this is always the short way round the circle, so it needs no unwrapping as long as the true change per frame is below π, which holds for the tiny motions this method is for;
-3. accumulates: φ(t) = angle(u(0)) + Σ Δφ. The sum is the unwrapped phase history.
+1. normalises each coefficient to unit length, $u(t) = C(t)/\lvert C(t)\rvert$, keeping only the phase;
+2. takes the frame-to-frame change with a conjugate product, $\Delta\phi(t) = \arg\big(u(t)\overline{u(t-1)}\big)$; this is always the short way round the circle, so it needs no unwrapping as long as the true change per frame is below $\pi$, which holds for the tiny motions this method is for;
+3. accumulates: $\phi(t) = \arg u(0) + \sum_{\tau=1}^{t} \Delta\phi(\tau)$. The sum is the unwrapped phase history.
 
-A coefficient that is exactly zero (a perfectly flat region) has no phase; the conjugate product gives angle(0) = 0, i.e. no motion, which is the right answer. An earlier version divided the coefficients instead and produced NaN there, which appeared as black patches (issue #22).
+A coefficient that is exactly zero (a perfectly flat region) has no phase; the conjugate product gives $\arg 0 = 0$, i.e. no motion, which is the right answer. An earlier version divided the coefficients instead and produced NaN there, which appeared as black patches (issue #22).
 
 ## 6. Choosing which motion to magnify: temporal filtering
 
@@ -110,29 +114,29 @@ The phase history φ(t) of a coefficient contains everything that moved it: slow
 
 This mode follows Anfinogentov & Nakariakov's implementation. It uses two low-pass filters built from flat-top windows (`scipy.signal.windows.flattop`), whose frequency response is extremely flat in the passband, so amplitudes of the oscillations kept are preserved accurately, at the price of a wide transition band.
 
-- A long low-pass Hlow (length `round(width / 0.2327)`, forced odd; 345 frames for the default width 80) gives the slow baseline φ0(t). What remains, φ − φ0, is the *detail*: everything faster than the baseline.
-- The detail is multiplied by k and added back: φ0 + k·(φ − φ0).
-- A short low-pass H2 (width 2, 9 frames) removes the fastest fluctuations, mostly noise.
+- A long low-pass $H_\text{low}$ (length `round(width / 0.2327)`, forced odd; 345 frames for the default width 80) gives the slow baseline $\phi_0(t)$. What remains, $\phi - \phi_0$, is the *detail*: everything faster than the baseline.
+- The detail is multiplied by $k$ and added back: $\phi_0 + k(\phi - \phi_0)$.
+- A short low-pass $H_2$ (width 2, 9 frames) removes the fastest fluctuations, mostly noise.
 
-For a motion at frequency f the gain is therefore
+For a motion at frequency $f$ the gain is therefore
 
-  G(f) = H2(f) · [1 + (k − 1) · (1 − Hlow(f))],
+$$G(f) = H_2(f)\big[1 + (k - 1)\big(1 - H_\text{low}(f)\big)\big],$$
 
-a band-pass that is 1 for slow motions, k in the middle and falls off for fast ones. At 30 fps with the defaults, the half-amplitude points are about 0.20 Hz and 8.6 Hz. The factor 0.2327 is an empirical width-to-length constant carried over from the reference IDL implementation, not the window's equivalent noise bandwidth (which is about 3.77 bins). Both filters are *zero-phase* (symmetric, odd length), so the magnified motion is not delayed relative to the original; an even-length window used to shift it by half a frame (issue #29).
+a band-pass that is 1 for slow motions, $k$ in the middle and falls off for fast ones. At 30 fps with the defaults, the half-amplitude points are about 0.20 Hz and 8.6 Hz. The factor 0.2327 is an empirical width-to-length constant carried over from the reference IDL implementation, not the window's equivalent noise bandwidth (which is about 3.77 bins). Both filters are *zero-phase* (symmetric, odd length), so the magnified motion is not delayed relative to the original; an even-length window used to shift it by half a frame (issue #29).
 
 ![Width-mode filters and the resulting gain, and the ideal gain of band mode for 0.8–2 Hz](images/theory/temporal_filters.png)
 
 ### Band mode (`--freq-low`, `--freq-high`)
 
-Here the detail is an ideal temporal band-pass BP of the phase, computed with an FFT, and the update is
+Here the detail is an ideal temporal band-pass $\mathrm{BP}$ of the phase, computed with an FFT, and the update is
 
-  φ̂ = φ + (k − 1) · BP(φ),
+$$\hat\phi = \phi + (k - 1)\mathrm{BP}(\phi),$$
 
-so motion inside [f_low, f_high] is multiplied by k and everything else is left exactly as it was. Before the FFT the phase history is extended symmetrically by its own length at both ends so that the transform's implicit periodicity does not join the last frame to the first. A clip of N frames at a given fps can only separate frequencies about fps/N apart (0.1 Hz for a 10-second clip); a band narrower than that gives unreliable gain, and a band that contains no frequency bin at all is rejected before processing. Band mode is the better choice when the frequency of interest is known, because a narrow band magnifies less noise.
+so motion inside $[f_\text{low}, f_\text{high}]$ is multiplied by $k$ and everything else is left exactly as it was. Before the FFT the phase history is extended symmetrically by its own length at both ends so that the transform's implicit periodicity does not join the last frame to the first. A clip of N frames at a given fps can only separate frequencies about fps/N apart (0.1 Hz for a 10-second clip); a band narrower than that gives unreliable gain, and a band that contains no frequency bin at all is rejected before processing. Band mode is the better choice when the frequency of interest is known, because a narrow band magnifies less noise.
 
 ### What it looks like for one coefficient
 
-A strong level-3 coefficient of face.mp4 (chosen automatically as the one with the most amplitude-weighted detail motion): the cumulative phase φ(t), its slow baseline φ0(t), the detail, and the detail after magnification by 10 and smoothing. Its main oscillation has a period of about 3.3 s (≈ 0.3 Hz), slow head motion rather than the pulse; with the default width it falls inside the magnified band (0.2–8.6 Hz). A pulse-only result would use band mode, e.g. `--freq-low 0.8 --freq-high 2`.
+A strong level-3 coefficient of face.mp4 (chosen automatically as the one with the most amplitude-weighted detail motion): the cumulative phase $\phi(t)$, its slow baseline $\phi_0(t)$, the detail, and the detail after magnification by 10 and smoothing. Its main oscillation has a period of about 3.3 s (≈ 0.3 Hz), slow head motion rather than the pulse; with the default width it falls inside the magnified band (0.2–8.6 Hz). A pulse-only result would use band mode, e.g. `--freq-low 0.8 --freq-high 2`.
 
 ![Phase of one face.mp4 coefficient over 10 s: cumulative phase, slow baseline, detail and the ×10 magnified detail](images/theory/phase_trace.png)
 
@@ -140,7 +144,7 @@ The magnified detail reaches ±3 rad, close to half a turn. The finer levels, wi
 
 ## 7. Reconstruction
 
-Each coefficient is rebuilt with its original amplitude and the new phase, |C(t)| · e^{iφ̂(t)}, and the inverse DTCWT turns the modified coefficients back into a frame. Keeping the amplitude means textures keep their contrast and nothing is brightened or darkened by the magnification itself, which is one reason the method produces fewer intensity artefacts than Eulerian magnification.
+Each coefficient is rebuilt with its original amplitude and the new phase, $\lvert C(t)\rvert e^{i\hat\phi(t)}$, and the inverse DTCWT turns the modified coefficients back into a frame. Keeping the amplitude means textures keep their contrast and nothing is brightened or darkened by the magnification itself, which is one reason the method produces fewer intensity artefacts than Eulerian magnification.
 
 ## 8. What is not magnified: the lowpass residual
 
@@ -158,12 +162,12 @@ Because real videos have no ground truth, the repository checks the method on sy
 
 ## 10. Colour
 
-Motion is carried almost entirely by brightness. By default (`--color-space rgb`) the pipeline magnifies R, G and B separately, which triples the work and lets the three channels' phases drift apart at high k, visible as colour fringes. With `--color-space yiq` only the luma Y = 0.299R + 0.587G + 0.114B is magnified. Converting to YIQ, replacing Y and converting back changes R, G and B by the same amount ΔY (the Y column of the inverse YIQ matrix is all ones), so the chroma (I, Q) is kept exactly.
+Motion is carried almost entirely by brightness. By default (`--color-space rgb`) the pipeline magnifies R, G and B separately, which triples the work and lets the three channels' phases drift apart at high k, visible as colour fringes. With `--color-space yiq` only the luma $Y = 0.299R + 0.587G + 0.114B$ is magnified. Converting to YIQ, replacing Y and converting back changes R, G and B by the same amount $\Delta Y$ (the Y column of the inverse YIQ matrix is all ones), so the chroma (I, Q) is kept exactly.
 
 ## 11. Choosing parameters
 
 - **Frequency band.** Pick the band of the motion you want: pulse about 0.8–2 Hz, breathing 0.15–0.5 Hz, a machine at its rotation or mains frequency. The upper edge must be below half the frame rate. Use band mode when you know the band.
-- **Magnification k.** Estimate the real displacement and keep k·δ below about 2–3 px (section 3). A very subtle pulse may tolerate k = 20 or more; a visible sway may only allow k = 2–3. Larger k on too large a motion produces echoes, not more motion.
+- **Magnification k.** Estimate the real displacement and keep $k\delta$ below about 2–3 px (section 3). A very subtle pulse may tolerate k = 20 or more; a visible sway may only allow k = 2–3. Larger k on too large a motion produces echoes, not more motion.
 - **Levels.** As many as the frame allows; the default 8 suits roughly 500×500 and up.
 - **Filters.** The defaults (`near_sym_b`, `qshift_b`) are a good balance; the shorter `near_sym_a`/`qshift_a` reproduce v1.x output.
 - **Noise.** For noisy, low-contrast video, `--phase-sigma 1` smooths the magnified phase over neighbouring coefficients, weighted by amplitude (after Wadhwa et al. 2013). It lowers the noise but also costs some magnification of clean edges ([measurements](research/synthetic-validation.md#4-the-39-proposals)).
@@ -174,14 +178,14 @@ Motion is carried almost entirely by brightness. By default (`--color-space rgb`
 |---|---|---|---|---|
 | Quantity magnified | pixel intensity change | local phase | local phase (from a Riesz transform) | local phase |
 | Motion model | first-order Taylor | exact within each sub-band | approximately exact | exact within each sub-band |
-| Magnification limit | (1 + α)·δ < λ/8 | larger, about 4× per the authors | similar to steerable | half a wavelength per level; ~2–3 px at the finest levels |
+| Magnification limit | $(1 + \alpha)\delta \lt  \lambda/8$ | larger, about 4× per the authors | similar to steerable | half a wavelength per level; ~2–3 px at the finest levels |
 | Noise | amplified with the signal | translated rather than amplified | similar to steerable | as steerable; optional amplitude-weighted smoothing |
 | Orientations | none | configurable | from the Riesz transform | 6 fixed (±15°, ±45°, ±75°) |
 | Redundancy / cost | low | high | low; designed for real-time use | 4:1; fast |
 
 ## 13. Glossary
 
-- **Amplitude, phase**: the length and angle of a complex coefficient C = A·e^{iφ}. Amplitude measures how much structure of that scale and orientation is present; phase measures where it sits.
+- **Amplitude, phase**: the length and angle of a complex coefficient $C = Ae^{i\phi}$. Amplitude measures how much structure of that scale and orientation is present; phase measures where it sits.
 - **Local phase**: the phase of a localised (wavelet) filter response, describing position within one small region at one scale.
 - **Analytic / quadrature pair**: two filters shifted by 90° in phase (cosine- and sine-like), whose combination gives a complex response with a clean amplitude and phase.
 - **DTCWT**: dual-tree complex wavelet transform; two real wavelet trees forming an approximately analytic complex transform.

@@ -390,7 +390,7 @@ Other names are rejected when the arguments are parsed.
 
 ### Notebook
 
-Open the notebook and run all cells. It calls `motion_mag.py` (cloning the repository first when run on Colab), magnifies the bundled `face.mp4`, saves `face_k3.avi`, and plots a before/after comparison. To use your own video, change the `filename` variable.
+Open the notebook and run all cells. It is a guided walk-through that follows [docs/theory.md](docs/theory.md): it shows the DTCWT sub-bands of a frame, measures how phase follows a sub-pixel shift at each level (and where it wraps), follows one coefficient's phase over time, plots the temporal filter's gain, runs the full magnification on the bundled `face.mp4` (rgb or yiq, width or band mode), compares before and after, and shows the displacement limit on a synthetic ring. It calls `motion_mag.py`, cloning the repository first when run on Colab. To use your own video, change the `filename` variable.
 
 ### Tips
 
