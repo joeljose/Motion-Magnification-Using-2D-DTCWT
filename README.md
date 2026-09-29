@@ -11,13 +11,22 @@
 
 ---
 
-Phase-based motion magnification amplifies subtle motions invisible to the naked eye. Unlike Eulerian (color-based) methods that amplify pixel intensity changes, phase-based magnification operates on the phase of complex wavelet coefficients — which directly encode local position — enabling 10–100x amplification with fewer artifacts. This is a Python implementation based on [Wadhwa et al. (SIGGRAPH 2013)](https://people.csail.mit.edu/nwadhwa/phase-video/) using the 2D Dual-Tree Complex Wavelet Transform.
+Phase-based motion magnification amplifies subtle motions invisible to the naked eye. Unlike Eulerian (color-based) methods that amplify pixel intensity changes, phase-based magnification operates on the phase of complex wavelet coefficients — which directly encode local position — supporting larger amplification with fewer artifacts. This is a Python implementation based on [Wadhwa et al. (SIGGRAPH 2013)](https://people.csail.mit.edu/nwadhwa/phase-video/) using the 2D Dual-Tree Complex Wavelet Transform.
 
 **v3.0.0** adds a band in Hz (`--freq-low/--freq-high`), a luma-only mode (`--color-space yiq`, ~3x faster), parallel CPU processing (`--jobs`), 3x lower CPU memory, validation against synthetic ground truth, and many correctness fixes; see [Breaking changes](#breaking-changes) and the [CHANGELOG](CHANGELOG.md). v2.0.0 added GPU acceleration via PyTorch.
 
 ---
 
+## How to learn this
+
+1. **[docs/theory.md](docs/theory.md)**: the method from first principles: why local phase encodes motion, how the DTCWT works, how phase is followed and filtered over time, where the limits come from, and how it compares with Eulerian and steerable/Riesz approaches. Includes a glossary and further reading.
+2. **[MotionMagDtcwt.ipynb](MotionMagDtcwt.ipynb)**: run it on a real video (also on [Colab](https://colab.research.google.com/github/joeljose/Motion-Magnification-Using-2D-DTCWT/blob/main/MotionMagDtcwt.ipynb)).
+3. **[docs/research/synthetic-validation.md](docs/research/synthetic-validation.md)**: how the implementation is checked against exact ground truth, and what it measured.
+4. **[motion_mag.py](motion_mag.py)**: `magnify_motions` follows the same steps in order.
+
 ## Table of Contents
+
+- [How to learn this](#how-to-learn-this)
 
 - [Theory](#theory)
   - [Eulerian vs Phase-Based Motion Magnification](#eulerian-vs-phase-based-motion-magnification)
@@ -61,17 +70,17 @@ There are two main approaches to video motion magnification:
 
 - **Eulerian (Wu et al., SIGGRAPH 2012)** — amplifies temporal pixel intensity changes at fixed spatial locations. Works well for revealing color variations (e.g., blood flow under skin) but produces artifacts when amplifying motion beyond small factors, because the first-order Taylor approximation breaks down.
 
-- **Phase-based (Wadhwa et al., SIGGRAPH 2013)** — operates on the phase of complex wavelet/pyramid coefficients. Phase directly encodes local spatial position, so phase changes over time directly represent motion. This supports much larger amplification factors (10–100x) with fewer artifacts because it manipulates motion information directly rather than relying on an intensity-to-motion approximation.
+- **Phase-based (Wadhwa et al., SIGGRAPH 2013)** — operates on the phase of complex wavelet/pyramid coefficients. Phase directly encodes local spatial position, so phase changes over time directly represent motion. This supports larger amplification factors with fewer artifacts (Wadhwa et al. report about 4× more than the linear Eulerian method) because it manipulates motion information directly rather than relying on an intensity-to-motion approximation. The limit is set by each scale's wavelength: once the magnified phase change passes ±π it wraps. In this implementation that means keeping the magnified displacement under about 3 px ([Limitations](#limitations)).
 
 For a band-pass filtered signal at spatial frequency $\omega_0$, a small displacement $\delta$ produces a phase shift:
 
 $$\Delta\phi \approx \omega_0 \cdot \delta$$
 
-By amplifying $\Delta\phi$, we amplify $\delta$ — the actual motion.
+By amplifying $\Delta\phi$, we amplify $\delta$ — the actual motion. For the full explanation, with derivations, figures and the measured limits, read **[docs/theory.md](docs/theory.md)**.
 
 ### Why DTCWT?
 
-The original phase-based method uses complex steerable pyramids, which are accurate but computationally expensive (~21x overcomplete). The **Dual-Tree Complex Wavelet Transform (DTCWT)**, developed by Kingsbury (Cambridge, late 1990s), provides a faster alternative.
+The original phase-based method uses complex steerable pyramids, which are accurate but highly redundant (how much depends on the number of orientations and the bandwidth of each band), so they are slow and memory-hungry. The **Dual-Tree Complex Wavelet Transform (DTCWT)**, developed by Kingsbury (Cambridge, late 1990s), provides a faster alternative.
 
 The standard Discrete Wavelet Transform (DWT) has two problems for phase-based processing: it is not shift-invariant (shifting input by 1 pixel completely changes coefficients), and it has poor directional selectivity (only 3 sub-bands). The DTCWT solves both by running two parallel filter banks whose wavelets are related by the Hilbert transform, producing complex-valued coefficients with clean amplitude and phase information.
 
@@ -81,10 +90,10 @@ In 2D, the DTCWT produces **6 complex sub-bands per scale** at approximately $\p
 |---|---|---|---|
 | Shift invariant | No | Approximately | Yes |
 | Directional | No (3 bands) | Yes (6 bands/scale) | Yes (configurable) |
-| Overcomplete | 1x | ~4x | ~21x |
+| Redundancy | 1:1 | 4:1 | much higher (configuration-dependent) |
 | Speed | Fast | Fast | Slow |
 
-The DTCWT is ~5x faster than complex steerable pyramids while still providing reliable phase information for motion estimation.
+Its 4:1 redundancy keeps memory and computation moderate while still providing reliable phase information for motion estimation.
 
 ### Algorithm Pipeline
 
@@ -98,13 +107,15 @@ Input Video
     |                       (nlevels scales x 6 orientations per frame)
     v
 [2. Phase Extraction] ──> Cumulative phase phi(t) via frame-to-frame
-    |                      complex division + cumsum
+    |                      conjugate multiply + cumsum
     v
-[3. Temporal Filter] ──> Separate base motion phi_0 (slow)
-    |                     from detail motion (phi - phi_0)
+[3. Temporal Filter] ──> width mode: base motion phi_0 (slow low-pass),
+    |                     detail = phi - phi_0
+    |                     band mode: detail = band-pass(phi) in Hz
     v
-[4. Phase Modification] ──> Amplify detail: phi_0 + (phi - phi_0) * k
-    |                        + smoothing pass (width=2)
+[4. Phase Modification] ──> width mode: phi_0 + (phi - phi_0) * k,
+    |                        then smoothing (width=2)
+    |                        band mode: phi + (k - 1) * detail
     v
 [5. Inverse DTCWT] ──> Reconstruct with |C| * e^(i*phi_modified)
     |
@@ -112,7 +123,7 @@ Input Video
 Output Video (magnified motions)
 ```
 
-Each color channel (R, G, B) is processed independently through the full pipeline, then recombined for the output video.
+By default each color channel (R, G, B) goes through the full pipeline independently and the results are recombined. With `--color-space yiq` only the luma is magnified and the colour of the input is kept.
 
 **1. Forward 2D DTCWT**
 
@@ -124,7 +135,7 @@ Cumulative phase is computed from frame-to-frame phase changes. For each coeffic
 
 **3. Temporal Filtering**
 
-A flat-top window low-pass filter separates the phase into base motion $\phi_0$ (slow/global movement) and detail motion ($\phi - \phi_0$, the subtle variations we want to amplify).
+In width mode (the default), a flat-top window low-pass filter separates the phase into base motion $\phi_0$ (slow/global movement) and detail motion ($\phi - \phi_0$, the subtle variations we want to amplify). In band mode (`--freq-low`/`--freq-high`), an ideal band-pass in Hz selects the detail directly; see [Temporal Filtering](#temporal-filtering).
 
 **4. Phase Modification**
 
@@ -391,7 +402,7 @@ Open the notebook and run all cells. It calls `motion_mag.py` (cloning the repos
   ![Input vs k=5 in rgb and yiq mode](.github/images/luma_vs_rgb.png)
 
   On face.mp4 at k=5 the average colour change per pixel drops from 2.35 to 0.01 (I/Q units). One caveat: in strongly saturated areas (e.g. the red shirt) the added brightness can clip one channel at 0 or 255, which shifts that pixel toward grey.
-- Use `--gpu` for ~5x faster processing if you have an NVIDIA GPU.
+- Use `--gpu` for faster processing if you have an NVIDIA GPU (face.mp4: ~24 s instead of ~60 s on an RTX 4050 laptop GPU).
 
 ---
 
@@ -492,6 +503,7 @@ scripts/
   make_golden.py           # Regenerates tests/data/golden_face.npz
   synthetic_shapes.py      # Pulsating-shape renderer and analyser
   bench_high_k.py          # Noise / halo benchmark at high k
+  make_theory_figures.py   # Regenerates the docs/theory.md figures (needs matplotlib)
 tests/
   test_motion_mag.py       # CPU unit tests
   test_motion_mag_gpu.py   # GPU-path tests (CUDA, or CPU tensors with CPU PyTorch)
@@ -500,6 +512,8 @@ tests/
 docs/design/               # Architecture decision records
   gpu-acceleration.md      # GPU design doc
   dtcwt-hardening.md       # Hardening design doc
+docs/theory.md             # Tutorial: the method from first principles
+docs/images/theory/        # Its figures (scripts/make_theory_figures.py)
 docs/research/
   synthetic-validation.md  # Pulsating-shape validation and the #39 high-k study
 VERSION                    # Release version (a test checks it matches __version__)
