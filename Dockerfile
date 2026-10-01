@@ -1,4 +1,4 @@
-FROM python:3.11.15-slim@sha256:90744cff8f32887f075c47d747a173ff333e9e98801667af93c357fa9f5e28ff
+FROM python:3.11.16-slim@sha256:e41613d42d4891e4930f79523f93f81bbc7632584ec65e36ab055f41a800b41e
 
 # Fixed non-root user; for bind mounts run with --user "$(id -u):$(id -g)"
 RUN useradd -m -u 1000 app
